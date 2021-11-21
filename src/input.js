@@ -545,7 +545,7 @@ function sliceSingleNode(slice) {
 
 function capturePaste(view, e) {
   if (!view.dom.parentNode) return
-  let plainText = view.shiftKey || view.state.selection.$from.parent.type.spec.code
+  let plainText = view.someProp("plainTextPaste") || view.shiftKey || view.state.selection.$from.parent.type.spec.code
   let target = view.dom.parentNode.appendChild(document.createElement(plainText ? "textarea" : "div"))
   if (!plainText) target.contentEditable = "true"
   target.style.cssText = "position: fixed; left: -10000px; top: 10px"
@@ -559,7 +559,7 @@ function capturePaste(view, e) {
 }
 
 function doPaste(view, text, html, e) {
-  let slice = parseFromClipboard(view, text, html, view.shiftKey, view.state.selection.$from)
+  let slice = parseFromClipboard(view, text, html, view.someProp("plainTextPaste") || view.shiftKey, view.state.selection.$from)
   if (view.someProp("handlePaste", f => f(view, e, slice || Slice.empty))) return true
   if (!slice) return false
 
