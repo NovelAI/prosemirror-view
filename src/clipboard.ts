@@ -8,13 +8,22 @@ export function serializeForClipboard(view: EditorView, slice: Slice) {
     openStart--
     openEnd--
     let node = content.firstChild!
+    // @ts-ignore
     context.push(node.type.name, node.attrs != node.type.defaultAttrs ? node.attrs : null)
     content = node.content
   }
 
   let serializer = view.someProp("clipboardSerializer") || DOMSerializer.fromSchema(view.state.schema)
   let doc = detachedDoc(), wrap = doc.createElement("div")
-  wrap.appendChild(serializer.serializeFragment(content, {document: doc}))
+  let contentClean = Fragment.fromJSON(view.state.schema, content.toJSON())
+  let removeIndices = []
+  contentClean.forEach((node, offset, index) => {
+    if(node.type.name === 'image') removeIndices.push(index)
+  })
+  removeIndices.forEach((value, index) => {
+    contentClean.replaceChild(value, new Node())
+  })
+  wrap.appendChild(serializer.serializeFragment(contentClean, {document: doc}))
 
   let firstChild = wrap.firstChild, needsWrap, wrappers = 0
   while (firstChild && firstChild.nodeType == 1 && (needsWrap = wrapMap[firstChild.nodeName.toLowerCase()])) {
