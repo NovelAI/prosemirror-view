@@ -1,4 +1,4 @@
-import {Slice, Fragment, DOMParser, DOMSerializer} from "prosemirror-model"
+import {Slice, Fragment, DOMParser, DOMSerializer, Node} from "prosemirror-model"
 import browser from "./browser"
 
 export function serializeForClipboard(view, slice) {
@@ -13,7 +13,15 @@ export function serializeForClipboard(view, slice) {
 
   let serializer = view.someProp("clipboardSerializer") || DOMSerializer.fromSchema(view.state.schema)
   let doc = detachedDoc(), wrap = doc.createElement("div")
-  wrap.appendChild(serializer.serializeFragment(content, {document: doc}))
+  let contentClean = Fragment.fromJSON(content.toJSON())
+  let removeIndices = []
+  contentClean.forEach((node, offset, index) => {
+    if(node.type.name === 'image') removeIndices.push(index)
+  })
+  removeIndices.forEach((value, index) => {
+    contentClean.replaceChild(value, new Node())
+  })
+  wrap.appendChild(serializer.serializeFragment(contentClean, {document: doc}))
 
   let firstChild = wrap.firstChild, needsWrap
   while (firstChild && firstChild.nodeType == 1 && (needsWrap = wrapMap[firstChild.nodeName.toLowerCase()])) {
