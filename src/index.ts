@@ -180,7 +180,9 @@ export class EditorView {
         : (state as any).scrollToSelection > (prev as any).scrollToSelection ? "to selection" : "preserve"
     let updateDoc = redraw || !this.docView.matchesNode(state.doc, outerDeco, innerDeco)
     if (updateDoc || !state.selection.eq(prev.selection)) updateSel = true
-    let oldScrollPos = scroll == "preserve" && updateSel && this.dom.style.overflowAnchor == null && storeScrollPos(this)
+    
+    // always preserve scroll position
+    let oldScrollPos = scroll == "preserve" && storeScrollPos(this) // let oldScrollPos = scroll == "preserve" && updateSel && this.dom.style.overflowAnchor == null && storeScrollPos(this)
 
     if (updateSel) {
       this.domObserver.stop()
