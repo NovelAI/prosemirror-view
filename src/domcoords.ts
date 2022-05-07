@@ -65,8 +65,11 @@ export function scrollRectIntoView(view: EditorView, rect: Rect, startDOM: Node)
 export function storeScrollPos(view: EditorView): {
   refDOM: HTMLElement,
   refTop: number,
-  stack: {dom: HTMLElement, top: number, left: number}[]
+  stack: { dom: HTMLElement, top: number, left: number }[],
+  heightBefore: number, scrollBefore: number
 } {
+  const heightBefore = view.dom.parentElement.scrollHeight
+  const scrollBefore = view.dom.parentElement.scrollTop
   let rect = view.dom.getBoundingClientRect(), startY = Math.max(0, rect.top)
   let refDOM: HTMLElement, refTop: number
   for (let x = (rect.left + rect.right) / 2, y = startY + 1;
@@ -80,7 +83,7 @@ export function storeScrollPos(view: EditorView): {
       break
     }
   }
-  return {refDOM: refDOM!, refTop: refTop!, stack: scrollStack(view.dom)}
+  return {refDOM: refDOM!, refTop: refTop!, stack: scrollStack(view.dom), heightBefore, scrollBefore}
 }
 
 function scrollStack(dom: Node): {dom: HTMLElement, top: number, left: number}[] {
@@ -94,15 +97,29 @@ function scrollStack(dom: Node): {dom: HTMLElement, top: number, left: number}[]
 
 // Reset the scroll position of the editor's parent nodes to that what
 // it was before, when storeScrollPos was called.
-export function resetScrollPos({refDOM, refTop, stack}: {
+export function resetScrollPos(view: EditorView, {refDOM, refTop, stack, heightBefore, scrollBefore}: {
   refDOM: HTMLElement,
   refTop: number,
-  stack: {dom: HTMLElement, top: number, left: number}[]
+  stack: { dom: HTMLElement, top: number, left: number }[],
+  heightBefore: number, scrollBefore: number
 }) {
   let newRefTop = refDOM ? refDOM.getBoundingClientRect().top : 0
-  restoreScrollStack(stack, newRefTop == 0 ? 0 : newRefTop - refTop)
+  if (!restoreScrollSimple(view, heightBefore, scrollBefore))
+    restoreScrollStack(stack, newRefTop == 0 ? 0 : newRefTop - refTop)
 }
 
+// Try to restore top scroll position when scrolling up
+function restoreScrollSimple(view, heightBefore, scrollBefore) {
+  const heightAfter = view.dom.parentElement.scrollHeight
+  const scrollAfter = view.dom.parentElement.scrollTop
+  const heightDiff = heightAfter - heightBefore
+  if (heightDiff > 0) {
+    const scrollDiff = scrollAfter - scrollBefore
+    view.dom.parentElement.scrollTop = scrollBefore + heightDiff
+    return true
+  }
+  return false
+}
 function restoreScrollStack(stack: {dom: HTMLElement, top: number, left: number}[], dTop: number) {
   for (let i = 0; i < stack.length; i++) {
     let {dom, top, left} = stack[i]
