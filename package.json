@@ -13,7 +13,9 @@
     },
     "./style/prosemirror.css": "./style/prosemirror.css"
   },
-  "sideEffects": ["./style/prosemirror.css"],
+  "sideEffects": [
+    "./style/prosemirror.css"
+  ],
   "style": "style/prosemirror.css",
   "license": "MIT",
   "maintainers": [
@@ -34,7 +36,7 @@
   },
   "devDependencies": {
     "@prosemirror/buildhelper": "^0.1.5",
-    "prosemirror-test-builder": "^1.0.0"
+    "prosemirror-test-builder": "^1.1.0"
   },
   "scripts": {
     "test": "pm-runtests",
