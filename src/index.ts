@@ -151,6 +151,7 @@ export class EditorView {
     this.updateStateInner(state, this._props)
   }
 
+  lastHeight = 0
   private updateStateInner(state: EditorState, prevProps: DirectEditorProps) {
     let prev = this.state, redraw = false, updateSel = false
     // When stored marks are added, stop composition, so that they can
@@ -180,9 +181,12 @@ export class EditorView {
         : (state as any).scrollToSelection > (prev as any).scrollToSelection ? "to selection" : "preserve"
     let updateDoc = redraw || !this.docView.matchesNode(state.doc, outerDeco, innerDeco)
     if (updateDoc || !state.selection.eq(prev.selection)) updateSel = true
+    if (this.lastHeight !== this.dom.offsetHeight) {
+      updateSel = true
+      this.lastHeight = this.dom.offsetHeight
+    }
 
-    // always preserve scroll position
-    let oldScrollPos = scroll == "preserve" && storeScrollPos(this) // let oldScrollPos = scroll == "preserve" && updateSel && this.dom.style.overflowAnchor == null && storeScrollPos(this)
+    let oldScrollPos = scroll == "preserve" && updateSel && storeScrollPos(this)
 
     if (updateSel) {
       this.domObserver.stop()
