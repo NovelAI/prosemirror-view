@@ -72,8 +72,8 @@ export function storeScrollPos(view: EditorView): {
   const scrollBefore = view.dom.parentElement?.scrollTop ?? 0
   let rect = view.dom.getBoundingClientRect(), startY = Math.max(0, rect.top)
   let refDOM: HTMLElement, refTop: number
-  refDOM = view.root as unknown as HTMLElement
-  refTop = (view.root as unknown as HTMLElement).getBoundingClientRect().top
+  refDOM = view.dom
+  refTop = refDOM.getBoundingClientRect().top
   return {refDOM: refDOM!, refTop: refTop!, stack: scrollStack(view.dom), heightBefore, scrollBefore}
 }
 
