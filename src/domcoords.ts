@@ -68,26 +68,17 @@ export function storeScrollPos(view: EditorView): {
   stack: { dom: HTMLElement, top: number, left: number }[],
   heightBefore: number, scrollBefore: number
 } {
-  const heightBefore = view.dom.parentElement.scrollHeight
-  const scrollBefore = view.dom.parentElement.scrollTop
+  const heightBefore = view.dom.parentElement?.scrollHeight ?? 0
+  const scrollBefore = view.dom.parentElement?.scrollTop ?? 0
   let rect = view.dom.getBoundingClientRect(), startY = Math.max(0, rect.top)
   let refDOM: HTMLElement, refTop: number
-  for (let x = (rect.left + rect.right) / 2, y = startY + 1;
-       y < Math.min(innerHeight, rect.bottom); y += 5) {
-    let dom = view.root.elementFromPoint(x, y)
-    if (!dom || dom == view.dom || !view.dom.contains(dom)) continue
-    let localRect = (dom as HTMLElement).getBoundingClientRect()
-    if (localRect.top >= startY - 20) {
-      refDOM = dom as HTMLElement
-      refTop = localRect.top
-      break
-    }
-  }
+  refDOM = view.root as unknown as HTMLElement
+  refTop = (view.root as unknown as HTMLElement).getBoundingClientRect().top
   return {refDOM: refDOM!, refTop: refTop!, stack: scrollStack(view.dom), heightBefore, scrollBefore}
 }
 
 function scrollStack(dom: Node): {dom: HTMLElement, top: number, left: number}[] {
-  let stack = [], doc = dom.ownerDocument
+  let stack = [] as {dom: HTMLElement, top: number, left: number}[], doc = dom.ownerDocument
   for (let cur: Node | null = dom; cur; cur = parentNode(cur)) {
     stack.push({dom: cur as HTMLElement, top: (cur as HTMLElement).scrollTop, left: (cur as HTMLElement).scrollLeft})
     if (dom == doc) break
