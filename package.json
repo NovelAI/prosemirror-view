@@ -36,10 +36,10 @@
   },
   "devDependencies": {
     "@prosemirror/buildhelper": "^0.1.5",
-    "prosemirror-test-builder": "^1.1.0"
+    "prosemirror-test-builder": "^1.1.1"
   },
   "scripts": {
     "test": "pm-runtests",
-    "prepare": "pm-buildhelper src/index.ts"
+    "build": "pm-buildhelper src/index.ts"
   }
 }
