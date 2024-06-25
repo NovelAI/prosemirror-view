@@ -118,7 +118,7 @@ export class DOMObserver {
 
   suppressSelectionUpdates() {
     this.suppressingSelectionUpdates = true
-    setTimeout(() => this.suppressingSelectionUpdates = false, 50)
+    setTimeout(() => this.suppressingSelectionUpdates = false, 100)
   }
 
   onSelectionChange() {
