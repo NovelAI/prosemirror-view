@@ -23,6 +23,9 @@ const textRange = function (node, from, to) {
     range.setStart(node, from || 0);
     return range;
 };
+const clearReusedRange = function () {
+    reusedRange = null;
+};
 // Scans forward and backward through DOM positions equivalent to the
 // given one to see if the two are in the same place (i.e. after a
 // text node vs at the end of that text node)
@@ -56,6 +59,44 @@ function scanFor(node, off, targetNode, targetOff, dir) {
 }
 function nodeSize(node) {
     return node.nodeType == 3 ? node.nodeValue.length : node.childNodes.length;
+}
+function textNodeBefore$1(node, offset) {
+    for (;;) {
+        if (node.nodeType == 3 && offset)
+            return node;
+        if (node.nodeType == 1 && offset > 0) {
+            if (node.contentEditable == "false")
+                return null;
+            node = node.childNodes[offset - 1];
+            offset = nodeSize(node);
+        }
+        else if (node.parentNode && !hasBlockDesc(node)) {
+            offset = domIndex(node);
+            node = node.parentNode;
+        }
+        else {
+            return null;
+        }
+    }
+}
+function textNodeAfter$1(node, offset) {
+    for (;;) {
+        if (node.nodeType == 3 && offset < node.nodeValue.length)
+            return node;
+        if (node.nodeType == 1 && offset < node.childNodes.length) {
+            if (node.contentEditable == "false")
+                return null;
+            node = node.childNodes[offset];
+            offset = 0;
+        }
+        else if (node.parentNode && !hasBlockDesc(node)) {
+            offset = domIndex(node) + 1;
+            node = node.parentNode;
+        }
+        else {
+            return null;
+        }
+    }
 }
 function isOnEdge(node, offset, parent) {
     for (let atStart = offset == 0, atEnd = offset == nodeSize(node); atStart || atEnd;) {
@@ -94,6 +135,24 @@ function deepActiveElement(doc) {
         elt = elt.shadowRoot.activeElement;
     return elt;
 }
+function caretFromPoint(doc, x, y) {
+    if (doc.caretPositionFromPoint) {
+        try { // Firefox throws for this call in hard-to-predict circumstances (#994)
+            let pos = doc.caretPositionFromPoint(x, y);
+            // Clip the offset, because Chrome will return a text offset
+            // into <input> nodes, which can't be treated as a regular DOM
+            // offset
+            if (pos)
+                return { node: pos.offsetNode, offset: Math.min(nodeSize(pos.offsetNode), pos.offset) };
+        }
+        catch (_) { }
+    }
+    if (doc.caretRangeFromPoint) {
+        let range = doc.caretRangeFromPoint(x, y);
+        if (range)
+            return { node: range.startContainer, offset: Math.min(nodeSize(range.startContainer), range.startOffset) };
+    }
+}
 
 const nav = typeof navigator != "undefined" ? navigator : null;
 const doc = typeof document != "undefined" ? document : null;
@@ -112,11 +171,18 @@ const safari = !ie && !!nav && /Apple Computer/.test(nav.vendor);
 // Is true for both iOS and iPadOS for convenience
 const ios = safari && (/Mobile\/\w+/.test(agent) || !!nav && nav.maxTouchPoints > 2);
 const mac = ios || (nav ? /Mac/.test(nav.platform) : false);
+const windows = nav ? /Win/.test(nav.platform) : false;
 const android = /Android \d/.test(agent);
 const webkit = !!doc && "webkitFontSmoothing" in doc.documentElement.style;
 const webkit_version = webkit ? +(/\bAppleWebKit\/(\d+)/.exec(navigator.userAgent) || [0, 0])[1] : 0;
 
 function windowRect(doc) {
+    let vp = doc.defaultView && doc.defaultView.visualViewport;
+    if (vp)
+        return {
+            left: 0, right: vp.width,
+            top: 0, bottom: vp.height
+        };
     return { left: 0, right: doc.documentElement.clientWidth,
         top: 0, bottom: doc.documentElement.clientHeight };
 }
@@ -147,7 +213,9 @@ function scrollRectIntoView(view, rect, startDOM) {
         if (rect.top < bounding.top + getSide(scrollThreshold, "top"))
             moveY = -(bounding.top - rect.top + getSide(scrollMargin, "top"));
         else if (rect.bottom > bounding.bottom - getSide(scrollThreshold, "bottom"))
-            moveY = rect.bottom - bounding.bottom + getSide(scrollMargin, "bottom");
+            moveY = rect.bottom - rect.top > bounding.bottom - bounding.top
+                ? rect.top + getSide(scrollMargin, "top") - bounding.top
+                : rect.bottom - bounding.bottom + getSide(scrollMargin, "bottom");
         if (rect.left < bounding.left + getSide(scrollThreshold, "left"))
             moveX = -(bounding.left - rect.left + getSide(scrollMargin, "left"));
         else if (rect.right > bounding.right - getSide(scrollThreshold, "right"))
@@ -166,7 +234,7 @@ function scrollRectIntoView(view, rect, startDOM) {
                 rect = { left: rect.left - dX, top: rect.top - dY, right: rect.right - dX, bottom: rect.bottom - dY };
             }
         }
-        if (atTop)
+        if (atTop || /^(fixed|sticky)$/.test(getComputedStyle(parent).position))
             break;
     }
 }
@@ -251,6 +319,7 @@ function focusPreventScroll(dom) {
 function findOffsetInNode(node, coords) {
     let closest, dxClosest = 2e8, coordsClosest, offset = 0;
     let rowBot = coords.top, rowTop = coords.top;
+    let firstBelow, coordsBelow;
     for (let child = node.firstChild, childIndex = 0; child; child = child.nextSibling, childIndex++) {
         let rects;
         if (child.nodeType == 1)
@@ -278,10 +347,19 @@ function findOffsetInNode(node, coords) {
                     continue;
                 }
             }
+            else if (rect.top > coords.top && !firstBelow && rect.left <= coords.left && rect.right >= coords.left) {
+                firstBelow = child;
+                coordsBelow = { left: Math.max(rect.left, Math.min(rect.right, coords.left)), top: rect.top };
+            }
             if (!closest && (coords.left >= rect.right && coords.top >= rect.top ||
                 coords.left >= rect.left && coords.top >= rect.bottom))
                 offset = childIndex + 1;
         }
+    }
+    if (!closest && firstBelow) {
+        closest = firstBelow;
+        coordsClosest = coordsBelow;
+        dxClosest = 0;
     }
     if (closest && closest.nodeType == 3)
         return findOffsetInText(closest, coordsClosest);
@@ -328,25 +406,34 @@ function posFromCaret(view, node, offset, coords) {
     // of nodes to see if there are block nodes that the coordinates
     // fall outside of. If so, we take the position before/after that
     // block. If not, we call `posFromDOM` on the raw node/offset.
-    let outside = -1;
-    for (let cur = node;;) {
+    let outsideBlock = -1;
+    for (let cur = node, sawBlock = false;;) {
         if (cur == view.dom)
             break;
-        let desc = view.docView.nearestDesc(cur, true);
+        let desc = view.docView.nearestDesc(cur, true), rect;
         if (!desc)
             return null;
-        if (desc.node.isBlock && desc.parent) {
-            let rect = desc.dom.getBoundingClientRect();
-            if (rect.left > coords.left || rect.top > coords.top)
-                outside = desc.posBefore;
-            else if (rect.right < coords.left || rect.bottom < coords.top)
-                outside = desc.posAfter;
-            else
-                break;
+        if (desc.dom.nodeType == 1 && (desc.node.isBlock && desc.parent || !desc.contentDOM) &&
+            // Ignore elements with zero-size bounding rectangles
+            ((rect = desc.dom.getBoundingClientRect()).width || rect.height)) {
+            if (desc.node.isBlock && desc.parent) {
+                // Only apply the horizontal test to the innermost block. Vertical for any parent.
+                if (!sawBlock && rect.left > coords.left || rect.top > coords.top)
+                    outsideBlock = desc.posBefore;
+                else if (!sawBlock && rect.right < coords.left || rect.bottom < coords.top)
+                    outsideBlock = desc.posAfter;
+                sawBlock = true;
+            }
+            if (!desc.contentDOM && outsideBlock < 0 && !desc.node.isText) {
+                // If we are inside a leaf, return the side of the leaf closer to the coords
+                let before = desc.node.isBlock ? coords.top < (rect.top + rect.bottom) / 2
+                    : coords.left < (rect.left + rect.right) / 2;
+                return before ? desc.posBefore : desc.posAfter;
+            }
         }
         cur = desc.dom.parentNode;
     }
-    return outside > -1 ? outside : view.docView.posFromDOM(node, offset, 1);
+    return outsideBlock > -1 ? outsideBlock : view.docView.posFromDOM(node, offset, -1);
 }
 function elementFromPoint(element, coords, box) {
     let len = element.childNodes.length;
@@ -370,19 +457,9 @@ function elementFromPoint(element, coords, box) {
 // Given an x,y position on the editor, get the position in the document.
 function posAtCoords(view, coords) {
     let doc = view.dom.ownerDocument, node, offset = 0;
-    if (doc.caretPositionFromPoint) {
-        try { // Firefox throws for this call in hard-to-predict circumstances (#994)
-            let pos = doc.caretPositionFromPoint(coords.left, coords.top);
-            if (pos)
-                ({ offsetNode: node, offset } = pos);
-        }
-        catch (_) { }
-    }
-    if (!node && doc.caretRangeFromPoint) {
-        let range = doc.caretRangeFromPoint(coords.left, coords.top);
-        if (range)
-            ({ startContainer: node, startOffset: offset } = range);
-    }
+    let caret = caretFromPoint(doc, coords.left, coords.top);
+    if (caret)
+        ({ node, offset } = caret);
     let elt = (view.root.elementFromPoint ? view.root : doc)
         .elementFromPoint(coords.left, coords.top);
     let pos;
@@ -415,6 +492,11 @@ function posAtCoords(view, coords) {
                     offset++;
             }
         }
+        let prev;
+        // When clicking above the right side of an uneditable node, Chrome will report a cursor position after that node.
+        if (webkit && offset && node.nodeType == 1 && (prev = node.childNodes[offset - 1]).nodeType == 1 &&
+            prev.contentEditable == "false" && prev.getBoundingClientRect().top >= coords.top)
+            offset--;
         // Suspiciously specific kludge to work around caret*FromPoint
         // never returning a position at the end of the document
         if (node == view.dom && offset == node.childNodes.length - 1 && node.lastChild.nodeType == 1 &&
@@ -431,9 +513,17 @@ function posAtCoords(view, coords) {
     let desc = view.docView.nearestDesc(elt, true);
     return { pos, inside: desc ? desc.posAtStart - desc.border : -1 };
 }
+function nonZero(rect) {
+    return rect.top < rect.bottom || rect.left < rect.right;
+}
 function singleRect(target, bias) {
     let rects = target.getClientRects();
-    return !rects.length ? target.getBoundingClientRect() : rects[bias < 0 ? 0 : rects.length - 1];
+    if (rects.length) {
+        let first = rects[bias < 0 ? 0 : rects.length - 1];
+        if (nonZero(first))
+            return first;
+    }
+    return Array.prototype.find.call(rects, nonZero) || target.getBoundingClientRect();
 }
 const BIDI = /[\u0590-\u05f4\u0600-\u06ff\u0700-\u08ac]/;
 // Given a position in the document model, get a bounding box of the
@@ -475,7 +565,7 @@ function coordsAtPos(view, pos, side) {
             else {
                 to++;
             }
-            return flattenV(singleRect(textRange(node, from, to), 1), takeSide < 0);
+            return flattenV(singleRect(textRange(node, from, to), takeSide), takeSide < 0);
         }
     }
     let $dom = view.state.doc.resolve(pos - (atom || 0));
@@ -555,7 +645,7 @@ function endOfTextblockVertical(view, state, dir) {
             if (!nearest)
                 break;
             if (nearest.node.isBlock) {
-                dom = nearest.dom;
+                dom = nearest.contentDOM || nearest.dom;
                 break;
             }
             dom = nearest.dom.parentNode;
@@ -587,6 +677,8 @@ function endOfTextblockHorizontal(view, state, dir) {
         return false;
     let offset = $head.parentOffset, atStart = !offset, atEnd = offset == $head.parent.content.size;
     let sel = view.domSelection();
+    if (!sel)
+        return $head.pos == $head.start() || $head.pos == $head.end();
     // If the textblock is all LTR, or the browser doesn't support
     // Selection.modify (Edge), fall back to a primitive approach
     if (!maybeRTL.test($head.parent.textContent) || !sel.modify)
@@ -774,8 +866,6 @@ class ViewDesc {
         }
         return (atEnd == null ? bias > 0 : atEnd) ? this.posAtEnd : this.posAtStart;
     }
-    // Scan up the dom finding the first desc that is a descendant of
-    // this one.
     nearestDesc(dom, onlyNodes = false) {
         for (let first = true, cur = dom; cur; cur = cur.parentNode) {
             let desc = this.getDesc(cur), nodeDOM;
@@ -809,8 +899,15 @@ class ViewDesc {
         for (let i = 0, offset = 0; i < this.children.length; i++) {
             let child = this.children[i], end = offset + child.size;
             if (offset == pos && end != offset) {
-                while (!child.border && child.children.length)
-                    child = child.children[0];
+                while (!child.border && child.children.length) {
+                    for (let i = 0; i < child.children.length; i++) {
+                        let inner = child.children[i];
+                        if (inner.size) {
+                            child = inner;
+                            break;
+                        }
+                    }
+                }
                 return child;
             }
             if (pos < end)
@@ -921,18 +1018,19 @@ class ViewDesc {
     // custom things with the selection. Note that this falls apart when
     // a selection starts in such a node and ends in another, in which
     // case we just use whatever domFromPos produces as a best effort.
-    setSelection(anchor, head, root, force = false) {
+    setSelection(anchor, head, view, force = false) {
         // If the selection falls entirely in a child, give it to that child
         let from = Math.min(anchor, head), to = Math.max(anchor, head);
         for (let i = 0, offset = 0; i < this.children.length; i++) {
             let child = this.children[i], end = offset + child.size;
             if (from > offset && to < end)
-                return child.setSelection(anchor - offset - child.border, head - offset - child.border, root, force);
+                return child.setSelection(anchor - offset - child.border, head - offset - child.border, view, force);
             offset = end;
         }
         let anchorDOM = this.domFromPos(anchor, anchor ? -1 : 1);
         let headDOM = head == anchor ? anchorDOM : this.domFromPos(head, head ? -1 : 1);
-        let domSel = root.getSelection();
+        let domSel = view.root.getSelection();
+        let selRange = view.domSelectionRange();
         let brKludge = false;
         // On Firefox, using Selection.collapse to put the cursor after a
         // BR node for some reason doesn't always work (#1073). On Safari,
@@ -963,14 +1061,14 @@ class ViewDesc {
         }
         // Firefox can act strangely when the selection is in front of an
         // uneditable node. See #1163 and https://bugzilla.mozilla.org/show_bug.cgi?id=1709536
-        if (gecko && domSel.focusNode && domSel.focusNode != headDOM.node && domSel.focusNode.nodeType == 1) {
-            let after = domSel.focusNode.childNodes[domSel.focusOffset];
+        if (gecko && selRange.focusNode && selRange.focusNode != headDOM.node && selRange.focusNode.nodeType == 1) {
+            let after = selRange.focusNode.childNodes[selRange.focusOffset];
             if (after && after.contentEditable == "false")
                 force = true;
         }
         if (!(force || brKludge && safari) &&
-            isEquivalentPosition(anchorDOM.node, anchorDOM.offset, domSel.anchorNode, domSel.anchorOffset) &&
-            isEquivalentPosition(headDOM.node, headDOM.offset, domSel.focusNode, domSel.focusOffset))
+            isEquivalentPosition(anchorDOM.node, anchorDOM.offset, selRange.anchorNode, selRange.anchorOffset) &&
+            isEquivalentPosition(headDOM.node, headDOM.offset, selRange.focusNode, selRange.focusOffset))
             return;
         // Selection.extend can be used to create an 'inverted' selection
         // (one where the focus is before the anchor), but not all
@@ -1046,6 +1144,7 @@ class ViewDesc {
     }
     get domAtom() { return false; }
     get ignoreForCoords() { return false; }
+    isText(text) { return false; }
 }
 // A widget desc represents a widget decoration, which is a DOM node
 // drawn between the document nodes.
@@ -1116,21 +1215,22 @@ class CompositionViewDesc extends ViewDesc {
 // some cases they will be split more often than would appear
 // necessary.
 class MarkViewDesc extends ViewDesc {
-    constructor(parent, mark, dom, contentDOM) {
+    constructor(parent, mark, dom, contentDOM, spec) {
         super(parent, [], dom, contentDOM);
         this.mark = mark;
+        this.spec = spec;
     }
     static create(parent, mark, inline, view) {
         let custom = view.nodeViews[mark.type.name];
         let spec = custom && custom(mark, view, inline);
         if (!spec || !spec.dom)
-            spec = DOMSerializer.renderSpec(document, mark.type.spec.toDOM(mark, inline));
-        return new MarkViewDesc(parent, mark, spec.dom, spec.contentDOM || spec.dom);
+            spec = DOMSerializer.renderSpec(document, mark.type.spec.toDOM(mark, inline), null, mark.attrs);
+        return new MarkViewDesc(parent, mark, spec.dom, spec.contentDOM || spec.dom, spec);
     }
     parseRule() {
         if ((this.dirty & NODE_DIRTY) || this.mark.type.spec.reparseInView)
             return null;
-        return { mark: this.mark.type.name, attrs: this.mark.attrs, contentElement: this.contentDOM || undefined };
+        return { mark: this.mark.type.name, attrs: this.mark.attrs, contentElement: this.contentDOM };
     }
     matchesMark(mark) { return this.dirty != NODE_DIRTY && this.mark.eq(mark); }
     markDirty(from, to) {
@@ -1157,6 +1257,14 @@ class MarkViewDesc extends ViewDesc {
         copy.children = nodes;
         return copy;
     }
+    ignoreMutation(mutation) {
+        return this.spec.ignoreMutation ? this.spec.ignoreMutation(mutation) : super.ignoreMutation(mutation);
+    }
+    destroy() {
+        if (this.spec.destroy)
+            this.spec.destroy();
+        super.destroy();
+    }
 }
 // Node view descs are the main, most common type of view desc, and
 // correspond to an actual node in the document. Unlike mark descs,
@@ -1168,8 +1276,6 @@ class NodeViewDesc extends ViewDesc {
         this.outerDeco = outerDeco;
         this.innerDeco = innerDeco;
         this.nodeDOM = nodeDOM;
-        if (contentDOM)
-            this.updateChildren(view, pos);
     }
     // By default, a node is rendered using the `toDOM` method from the
     // node type spec. But client code can use the `nodeViews` spec to
@@ -1198,7 +1304,8 @@ class NodeViewDesc extends ViewDesc {
                 throw new RangeError("Text must be rendered as a DOM text node");
         }
         else if (!dom) {
-            ({ dom, contentDOM } = DOMSerializer.renderSpec(document, node.type.spec.toDOM(node)));
+            let spec = DOMSerializer.renderSpec(document, node.type.spec.toDOM(node), null, node.attrs);
+            ({ dom, contentDOM } = spec);
         }
         if (!contentDOM && !node.isText && dom.nodeName != "BR") { // Chrome gets confused by <br contenteditable=false>
             if (!dom.hasAttribute("contenteditable"))
@@ -1282,7 +1389,7 @@ class NodeViewDesc extends ViewDesc {
                 view.state.selection.to < off + child.nodeSize &&
                 (compIndex = updater.findIndexWithChild(composition.node)) > -1 &&
                 updater.updateNodeAt(child, outerDeco, innerDeco, compIndex, view)) ;
-            else if (updater.updateNextNode(child, outerDeco, innerDeco, view, i)) ;
+            else if (updater.updateNextNode(child, outerDeco, innerDeco, view, i, off)) ;
             else {
                 // Add it as a new view
                 updater.addNode(child, outerDeco, innerDeco, view, off);
@@ -1310,8 +1417,7 @@ class NodeViewDesc extends ViewDesc {
         let { from, to } = view.state.selection;
         if (!(view.state.selection instanceof TextSelection) || from < pos || to > pos + this.node.content.size)
             return null;
-        let sel = view.domSelectionRange();
-        let textNode = nearbyTextNode(sel.focusNode, sel.focusOffset);
+        let textNode = view.input.compositionNode;
         if (!textNode || !this.dom.contains(textNode.parentNode))
             return null;
         if (this.node.inlineContent) {
@@ -1385,10 +1491,11 @@ class NodeViewDesc extends ViewDesc {
     }
     // Remove selected node marking from this node.
     deselectNode() {
-        if (this.nodeDOM.nodeType == 1)
+        if (this.nodeDOM.nodeType == 1) {
             this.nodeDOM.classList.remove("ProseMirror-selectednode");
-        if (this.contentDOM || !this.node.type.spec.draggable)
-            this.dom.removeAttribute("draggable");
+            if (this.contentDOM || !this.node.type.spec.draggable)
+                this.dom.removeAttribute("draggable");
+        }
     }
     get domAtom() { return this.node.isAtom; }
 }
@@ -1396,7 +1503,10 @@ class NodeViewDesc extends ViewDesc {
 // and used by the view class.
 function docViewDesc(doc, outerDeco, innerDeco, dom, view) {
     applyOuterDeco(dom, outerDeco, doc);
-    return new NodeViewDesc(undefined, doc, outerDeco, innerDeco, dom, dom, dom, view, 0);
+    let docView = new NodeViewDesc(undefined, doc, outerDeco, innerDeco, dom, dom, dom, view, 0);
+    if (docView.contentDOM)
+        docView.updateChildren(view, 0);
+    return docView;
 }
 class TextViewDesc extends NodeViewDesc {
     constructor(parent, node, outerDeco, innerDeco, dom, nodeDOM, view) {
@@ -1450,6 +1560,7 @@ class TextViewDesc extends NodeViewDesc {
             this.dirty = NODE_DIRTY;
     }
     get domAtom() { return false; }
+    isText(text) { return this.node.text == text; }
 }
 // A dummy desc used to tag trailing BR or IMG nodes created to work
 // around contentEditable terribleness.
@@ -1473,7 +1584,7 @@ class CustomNodeViewDesc extends NodeViewDesc {
     update(node, outerDeco, innerDeco, view) {
         if (this.dirty == NODE_DIRTY)
             return false;
-        if (this.spec.update) {
+        if (this.spec.update && (this.node.type == node.type || this.spec.multiType)) {
             let result = this.spec.update(node, outerDeco, innerDeco);
             if (result)
                 this.updateInner(node, outerDeco, innerDeco, view);
@@ -1492,9 +1603,9 @@ class CustomNodeViewDesc extends NodeViewDesc {
     deselectNode() {
         this.spec.deselectNode ? this.spec.deselectNode() : super.deselectNode();
     }
-    setSelection(anchor, head, root, force) {
-        this.spec.setSelection ? this.spec.setSelection(anchor, head, root)
-            : super.setSelection(anchor, head, root, force);
+    setSelection(anchor, head, view, force) {
+        this.spec.setSelection ? this.spec.setSelection(anchor, head, view.root)
+            : super.setSelection(anchor, head, view, force);
     }
     destroy() {
         if (this.spec.destroy)
@@ -1693,7 +1804,8 @@ class ViewTreeUpdater {
             this.stack.push(this.top, this.index + 1);
             let found = -1;
             for (let i = this.index; i < Math.min(this.index + 3, this.top.children.length); i++) {
-                if (this.top.children[i].matchesMark(marks[depth])) {
+                let next = this.top.children[i];
+                if (next.matchesMark(marks[depth]) && !this.isLocked(next.dom)) {
                     found = i;
                     break;
                 }
@@ -1768,18 +1880,18 @@ class ViewTreeUpdater {
     }
     // Try to update the next node, if any, to the given data. Checks
     // pre-matches to avoid overwriting nodes that could still be used.
-    updateNextNode(node, outerDeco, innerDeco, view, index) {
+    updateNextNode(node, outerDeco, innerDeco, view, index, pos) {
         for (let i = this.index; i < this.top.children.length; i++) {
             let next = this.top.children[i];
             if (next instanceof NodeViewDesc) {
                 let preMatch = this.preMatch.matched.get(next);
                 if (preMatch != null && preMatch != index)
                     return false;
-                let nextDOM = next.dom;
+                let nextDOM = next.dom, updated;
                 // Can't update if nextDOM is or contains this.lock, except if
                 // it's a text node whose content already matches the new text
                 // and whose decorations match the new ones.
-                let locked = this.lock && (nextDOM == this.lock || nextDOM.nodeType == 1 && nextDOM.contains(this.lock.parentNode)) &&
+                let locked = this.isLocked(nextDOM) &&
                     !(node.isText && next.node && next.node.isText && next.nodeDOM.nodeValue == node.text &&
                         next.dirty != NODE_DIRTY && sameOuterDeco(outerDeco, next.outerDeco));
                 if (!locked && next.update(node, outerDeco, innerDeco, view)) {
@@ -1789,14 +1901,46 @@ class ViewTreeUpdater {
                     this.index++;
                     return true;
                 }
+                else if (!locked && (updated = this.recreateWrapper(next, node, outerDeco, innerDeco, view, pos))) {
+                    this.destroyBetween(this.index, i);
+                    this.top.children[this.index] = updated;
+                    if (updated.contentDOM) {
+                        updated.dirty = CONTENT_DIRTY;
+                        updated.updateChildren(view, pos + 1);
+                        updated.dirty = NOT_DIRTY;
+                    }
+                    this.changed = true;
+                    this.index++;
+                    return true;
+                }
                 break;
             }
         }
         return false;
     }
+    // When a node with content is replaced by a different node with
+    // identical content, move over its children.
+    recreateWrapper(next, node, outerDeco, innerDeco, view, pos) {
+        if (next.dirty || node.isAtom || !next.children.length ||
+            !next.node.content.eq(node.content) ||
+            !sameOuterDeco(outerDeco, next.outerDeco) || !innerDeco.eq(next.innerDeco))
+            return null;
+        let wrapper = NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos);
+        if (wrapper.contentDOM) {
+            wrapper.children = next.children;
+            next.children = [];
+            for (let ch of wrapper.children)
+                ch.parent = wrapper;
+        }
+        next.destroy();
+        return wrapper;
+    }
     // Insert the node as a newly created node desc.
     addNode(node, outerDeco, innerDeco, view, pos) {
-        this.top.children.splice(this.index++, 0, NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos));
+        let desc = NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos);
+        if (desc.contentDOM)
+            desc.updateChildren(view, pos + 1);
+        this.top.children.splice(this.index++, 0, desc);
         this.changed = true;
     }
     placeWidget(widget, view, pos) {
@@ -1848,6 +1992,9 @@ class ViewTreeUpdater {
                 parent.children.splice(this.index++, 0, hack);
             this.changed = true;
         }
+    }
+    isLocked(node) {
+        return this.lock && (node == this.lock || node.nodeType == 1 && node.contains(this.lock.parentNode));
     }
 }
 // Iterate from the end of the fragment and array of descs to find
@@ -1913,10 +2060,17 @@ function iterDeco(parent, deco, onWidget, onNode) {
     }
     let decoIndex = 0, active = [], restNode = null;
     for (let parentIndex = 0;;) {
-        if (decoIndex < locals.length && locals[decoIndex].to == offset) {
-            let widget = locals[decoIndex++], widgets;
-            while (decoIndex < locals.length && locals[decoIndex].to == offset)
-                (widgets || (widgets = [widget])).push(locals[decoIndex++]);
+        let widget, widgets;
+        while (decoIndex < locals.length && locals[decoIndex].to == offset) {
+            let next = locals[decoIndex++];
+            if (next.widget) {
+                if (!widget)
+                    widget = next;
+                else
+                    (widgets || (widgets = [widget])).push(next);
+            }
+        }
+        if (widget) {
             if (widgets) {
                 widgets.sort(compareSide);
                 for (let i = 0; i < widgets.length; i++)
@@ -1959,6 +2113,10 @@ function iterDeco(parent, deco, onWidget, onNode) {
                 index = -1;
             }
         }
+        else {
+            while (decoIndex < locals.length && locals[decoIndex].to < end)
+                decoIndex++;
+        }
         let outerDeco = child.isInline && !child.isLeaf ? active.filter(d => !d.inline) : active.slice();
         onNode(child, outerDeco, deco.forChild(offset, child), index);
         offset = end;
@@ -1972,25 +2130,6 @@ function iosHacks(dom) {
         dom.style.cssText = oldCSS + "; list-style: square !important";
         window.getComputedStyle(dom).listStyle;
         dom.style.cssText = oldCSS;
-    }
-}
-function nearbyTextNode(node, offset) {
-    for (;;) {
-        if (node.nodeType == 3)
-            return node;
-        if (node.nodeType == 1 && offset > 0) {
-            if (node.childNodes.length > offset && node.childNodes[offset].nodeType == 3)
-                return node.childNodes[offset];
-            node = node.childNodes[offset - 1];
-            offset = nodeSize(node);
-        }
-        else if (node.nodeType == 1 && offset < node.childNodes.length) {
-            node = node.childNodes[offset];
-            offset = 0;
-        }
-        else {
-            return null;
-        }
     }
 }
 // Find a piece of text in an inline fragment, overlapping from-to
@@ -2009,6 +2148,8 @@ function findTextInFragment(frag, text, from, to) {
             str += next.text;
         }
         if (pos >= from) {
+            if (pos >= to && str.slice(to - text.length - childStart, to - childStart) == text)
+                return to - text.length;
             let found = childStart < to ? str.lastIndexOf(text, to - childStart - 1) : -1;
             if (found >= 0 && found + text.length + childStart >= from)
                 return childStart + found;
@@ -2053,9 +2194,9 @@ function selectionFromDOM(view, origin = null) {
     let head = view.docView.posFromDOM(domSel.focusNode, domSel.focusOffset, 1);
     if (head < 0)
         return null;
-    let $head = doc.resolve(head), $anchor, selection;
+    let $head = doc.resolve(head), anchor, selection;
     if (selectionCollapsed(domSel)) {
-        $anchor = $head;
+        anchor = head;
         while (nearestDesc && !nearestDesc.node)
             nearestDesc = nearestDesc.parent;
         let nearestDescNode = nearestDesc.node;
@@ -2066,11 +2207,25 @@ function selectionFromDOM(view, origin = null) {
         }
     }
     else {
-        let anchor = view.docView.posFromDOM(domSel.anchorNode, domSel.anchorOffset, 1);
+        if (domSel instanceof view.dom.ownerDocument.defaultView.Selection && domSel.rangeCount > 1) {
+            let min = head, max = head;
+            for (let i = 0; i < domSel.rangeCount; i++) {
+                let range = domSel.getRangeAt(i);
+                min = Math.min(min, view.docView.posFromDOM(range.startContainer, range.startOffset, 1));
+                max = Math.max(max, view.docView.posFromDOM(range.endContainer, range.endOffset, -1));
+            }
+            if (min < 0)
+                return null;
+            [anchor, head] = max == view.state.selection.anchor ? [max, min] : [min, max];
+            $head = doc.resolve(head);
+        }
+        else {
+            anchor = view.docView.posFromDOM(domSel.anchorNode, domSel.anchorOffset, 1);
+        }
         if (anchor < 0)
             return null;
-        $anchor = doc.resolve(anchor);
     }
+    let $anchor = doc.resolve(anchor);
     if (!selection) {
         let bias = origin == "pointer" || (view.state.selection.head < $head.pos && !inWidget) ? 1 : -1;
         selection = selectionBetween(view, $anchor, $head, bias);
@@ -2110,7 +2265,7 @@ function selectionToDOM(view, force = false) {
             if (!sel.empty && !sel.$from.parent.inlineContent)
                 resetEditableTo = temporarilyEditableNear(view, sel.to);
         }
-        view.docView.setSelection(anchor, head, view.root, force);
+        view.docView.setSelection(anchor, head, view, force);
         if (brokenSelectBetweenUneditable) {
             if (resetEditableFrom)
                 resetEditable(resetEditableFrom);
@@ -2179,12 +2334,14 @@ function removeClassOnSelectionChange(view) {
 }
 function selectCursorWrapper(view) {
     let domSel = view.domSelection(), range = document.createRange();
+    if (!domSel)
+        return;
     let node = view.cursorWrapper.dom, img = node.nodeName == "IMG";
     if (img)
-        range.setEnd(node.parentNode, domIndex(node) + 1);
+        range.setStart(node.parentNode, domIndex(node) + 1);
     else
-        range.setEnd(node, 0);
-    range.collapse(false);
+        range.setStart(node, 0);
+    range.collapse(true);
     domSel.removeAllRanges();
     domSel.addRange(range);
     // Kludge to kill 'control selection' in IE11 when selecting an
@@ -2262,10 +2419,17 @@ function apply(view, sel) {
 function selectHorizontally(view, dir, mods) {
     let sel = view.state.selection;
     if (sel instanceof TextSelection) {
-        if (!sel.empty || mods.indexOf("s") > -1) {
+        if (mods.indexOf("s") > -1) {
+            let { $head } = sel, node = $head.textOffset ? null : dir < 0 ? $head.nodeBefore : $head.nodeAfter;
+            if (!node || node.isText || !node.isLeaf)
+                return false;
+            let $newHead = view.state.doc.resolve($head.pos + node.nodeSize * (dir < 0 ? -1 : 1));
+            return apply(view, new TextSelection(sel.$anchor, $newHead));
+        }
+        else if (!sel.empty) {
             return false;
         }
-        else if (view.endOfTextblock(dir > 0 ? "right" : "left")) {
+        else if (view.endOfTextblock(dir > 0 ? "forward" : "backward")) {
             let next = moveSelectionBlock(view.state, dir);
             if (next && (next instanceof NodeSelection))
                 return apply(view, next);
@@ -2305,13 +2469,16 @@ function selectHorizontally(view, dir, mods) {
 function nodeLen(node) {
     return node.nodeType == 3 ? node.nodeValue.length : node.childNodes.length;
 }
-function isIgnorable(dom) {
+function isIgnorable(dom, dir) {
     let desc = dom.pmViewDesc;
-    return desc && desc.size == 0 && (dom.nextSibling || dom.nodeName != "BR");
+    return desc && desc.size == 0 && (dir < 0 || dom.nextSibling || dom.nodeName != "BR");
+}
+function skipIgnoredNodes(view, dir) {
+    return dir < 0 ? skipIgnoredNodesBefore(view) : skipIgnoredNodesAfter(view);
 }
 // Make sure the cursor isn't directly after one or more ignored
 // nodes, which will confuse the browser's cursor motion logic.
-function skipIgnoredNodesLeft(view) {
+function skipIgnoredNodesBefore(view) {
     let sel = view.domSelectionRange();
     let node = sel.focusNode, offset = sel.focusOffset;
     if (!node)
@@ -2320,7 +2487,7 @@ function skipIgnoredNodesLeft(view) {
     // Gecko will do odd things when the selection is directly in front
     // of a non-editable node, so in that case, move it into the next
     // node if possible. Issue prosemirror/prosemirror#832.
-    if (gecko && node.nodeType == 1 && offset < nodeLen(node) && isIgnorable(node.childNodes[offset]))
+    if (gecko && node.nodeType == 1 && offset < nodeLen(node) && isIgnorable(node.childNodes[offset], -1))
         force = true;
     for (;;) {
         if (offset > 0) {
@@ -2329,7 +2496,7 @@ function skipIgnoredNodesLeft(view) {
             }
             else {
                 let before = node.childNodes[offset - 1];
-                if (isIgnorable(before)) {
+                if (isIgnorable(before, -1)) {
                     moveNode = node;
                     moveOffset = --offset;
                 }
@@ -2346,7 +2513,7 @@ function skipIgnoredNodesLeft(view) {
         }
         else {
             let prev = node.previousSibling;
-            while (prev && isIgnorable(prev)) {
+            while (prev && isIgnorable(prev, -1)) {
                 moveNode = node.parentNode;
                 moveOffset = domIndex(prev);
                 prev = prev.previousSibling;
@@ -2370,7 +2537,7 @@ function skipIgnoredNodesLeft(view) {
 }
 // Make sure the cursor isn't directly before one or more ignored
 // nodes.
-function skipIgnoredNodesRight(view) {
+function skipIgnoredNodesAfter(view) {
     let sel = view.domSelectionRange();
     let node = sel.focusNode, offset = sel.focusOffset;
     if (!node)
@@ -2382,7 +2549,7 @@ function skipIgnoredNodesRight(view) {
             if (node.nodeType != 1)
                 break;
             let after = node.childNodes[offset];
-            if (isIgnorable(after)) {
+            if (isIgnorable(after, 1)) {
                 moveNode = node;
                 moveOffset = ++offset;
             }
@@ -2394,7 +2561,7 @@ function skipIgnoredNodesRight(view) {
         }
         else {
             let next = node.nextSibling;
-            while (next && isIgnorable(next)) {
+            while (next && isIgnorable(next, 1)) {
                 moveNode = next.parentNode;
                 moveOffset = domIndex(next) + 1;
                 next = next.nextSibling;
@@ -2419,8 +2586,51 @@ function isBlockNode(dom) {
     let desc = dom.pmViewDesc;
     return desc && desc.node && desc.node.isBlock;
 }
+function textNodeAfter(node, offset) {
+    while (node && offset == node.childNodes.length && !hasBlockDesc(node)) {
+        offset = domIndex(node) + 1;
+        node = node.parentNode;
+    }
+    while (node && offset < node.childNodes.length) {
+        let next = node.childNodes[offset];
+        if (next.nodeType == 3)
+            return next;
+        if (next.nodeType == 1 && next.contentEditable == "false")
+            break;
+        node = next;
+        offset = 0;
+    }
+}
+function textNodeBefore(node, offset) {
+    while (node && !offset && !hasBlockDesc(node)) {
+        offset = domIndex(node);
+        node = node.parentNode;
+    }
+    while (node && offset) {
+        let next = node.childNodes[offset - 1];
+        if (next.nodeType == 3)
+            return next;
+        if (next.nodeType == 1 && next.contentEditable == "false")
+            break;
+        node = next;
+        offset = node.childNodes.length;
+    }
+}
 function setSelFocus(view, node, offset) {
+    if (node.nodeType != 3) {
+        let before, after;
+        if (after = textNodeAfter(node, offset)) {
+            node = after;
+            offset = 0;
+        }
+        else if (before = textNodeBefore(node, offset)) {
+            node = before;
+            offset = before.nodeValue.length;
+        }
+    }
     let sel = view.domSelection();
+    if (!sel)
+        return;
     if (selectionCollapsed(sel)) {
         let range = document.createRange();
         range.setEnd(node, offset);
@@ -2438,6 +2648,26 @@ function setSelFocus(view, node, offset) {
         if (view.state == state)
             selectionToDOM(view);
     }, 50);
+}
+function findDirection(view, pos) {
+    let $pos = view.state.doc.resolve(pos);
+    if (!(chrome || windows) && $pos.parent.inlineContent) {
+        let coords = view.coordsAtPos(pos);
+        if (pos > $pos.start()) {
+            let before = view.coordsAtPos(pos - 1);
+            let mid = (before.top + before.bottom) / 2;
+            if (mid > coords.top && mid < coords.bottom && Math.abs(before.left - coords.left) > 1)
+                return before.left < coords.left ? "ltr" : "rtl";
+        }
+        if (pos < $pos.end()) {
+            let after = view.coordsAtPos(pos + 1);
+            let mid = (after.top + after.bottom) / 2;
+            if (mid > coords.top && mid < coords.bottom && Math.abs(after.left - coords.left) > 1)
+                return after.left > coords.left ? "ltr" : "rtl";
+        }
+    }
+    let computed = getComputedStyle(view.dom).direction;
+    return computed == "rtl" ? "rtl" : "ltr";
 }
 // Check whether vertical selection motion would involve node
 // selections. If so, apply it (if not, the result is left to the
@@ -2526,25 +2756,27 @@ function getMods(event) {
 function captureKeyDown(view, event) {
     let code = event.keyCode, mods = getMods(event);
     if (code == 8 || (mac && code == 72 && mods == "c")) { // Backspace, Ctrl-h on Mac
-        return stopNativeHorizontalDelete(view, -1) || skipIgnoredNodesLeft(view);
+        return stopNativeHorizontalDelete(view, -1) || skipIgnoredNodes(view, -1);
     }
-    else if (code == 46 || (mac && code == 68 && mods == "c")) { // Delete, Ctrl-d on Mac
-        return stopNativeHorizontalDelete(view, 1) || skipIgnoredNodesRight(view);
+    else if ((code == 46 && !event.shiftKey) || (mac && code == 68 && mods == "c")) { // Delete, Ctrl-d on Mac
+        return stopNativeHorizontalDelete(view, 1) || skipIgnoredNodes(view, 1);
     }
     else if (code == 13 || code == 27) { // Enter, Esc
         return true;
     }
     else if (code == 37 || (mac && code == 66 && mods == "c")) { // Left arrow, Ctrl-b on Mac
-        return selectHorizontally(view, -1, mods) || skipIgnoredNodesLeft(view);
+        let dir = code == 37 ? (findDirection(view, view.state.selection.from) == "ltr" ? -1 : 1) : -1;
+        return selectHorizontally(view, dir, mods) || skipIgnoredNodes(view, dir);
     }
     else if (code == 39 || (mac && code == 70 && mods == "c")) { // Right arrow, Ctrl-f on Mac
-        return selectHorizontally(view, 1, mods) || skipIgnoredNodesRight(view);
+        let dir = code == 39 ? (findDirection(view, view.state.selection.from) == "ltr" ? 1 : -1) : 1;
+        return selectHorizontally(view, dir, mods) || skipIgnoredNodes(view, dir);
     }
     else if (code == 38 || (mac && code == 80 && mods == "c")) { // Up arrow, Ctrl-p on Mac
-        return selectVertically(view, -1, mods) || skipIgnoredNodesLeft(view);
+        return selectVertically(view, -1, mods) || skipIgnoredNodes(view, -1);
     }
     else if (code == 40 || (mac && code == 78 && mods == "c")) { // Down arrow, Ctrl-n on Mac
-        return safariDownArrowBug(view) || selectVertically(view, 1, mods) || skipIgnoredNodesRight(view);
+        return safariDownArrowBug(view) || selectVertically(view, 1, mods) || skipIgnoredNodes(view, 1);
     }
     else if (mods == (mac ? "m" : "c") &&
         (code == 66 || code == 73 || code == 89 || code == 90)) { // Mod-[biyz]
@@ -2591,7 +2823,7 @@ function serializeForClipboard(view, slice) {
         firstChild.setAttribute("data-pm-slice", `${openStart} ${openEnd}${wrappers ? ` -${wrappers}` : ""} ${JSON.stringify(context)}`);
     let text = view.someProp("clipboardTextSerializer", f => f(slice, view)) ||
         slice.content.textBetween(0, slice.content.size, "\n\n");
-    return { dom: wrap, text };
+    return { dom: wrap, text, slice };
 }
 // Read a slice of content from the clipboard (or drop data).
 function parseFromClipboard(view, text, html, plainText, $context) {
@@ -2729,10 +2961,12 @@ function closeRight(node, depth) {
 }
 function closeRange(fragment, side, from, to, depth, openEnd) {
     let node = side < 0 ? fragment.firstChild : fragment.lastChild, inner = node.content;
+    if (fragment.childCount > 1)
+        openEnd = 0;
     if (depth < to - 1)
         inner = closeRange(inner, side, from, to, depth + 1, openEnd);
     if (depth >= from)
-        inner = side < 0 ? node.contentMatchAt(0).fillBefore(inner, fragment.childCount > 1 || openEnd <= depth).append(inner)
+        inner = side < 0 ? node.contentMatchAt(0).fillBefore(inner, openEnd <= depth).append(inner)
             : inner.append(node.contentMatchAt(node.childCount).fillBefore(Fragment.empty, true));
     return fragment.replaceChild(side < 0 ? 0 : fragment.childCount - 1, node.copy(inner));
 }
@@ -2761,6 +2995,18 @@ let _detachedDoc = null;
 function detachedDoc() {
     return _detachedDoc || (_detachedDoc = document.implementation.createHTMLDocument("title"));
 }
+let _policy = null;
+function maybeWrapTrusted(html) {
+    let trustedTypes = window.trustedTypes;
+    if (!trustedTypes)
+        return html;
+    // With the require-trusted-types-for CSP, Chrome will block
+    // innerHTML, even on a detached document. This wraps the string in
+    // a way that makes the browser allow us to use its parser again.
+    if (!_policy)
+        _policy = trustedTypes.createPolicy("ProseMirrorClipboard", { createHTML: (s) => s });
+    return _policy.createHTML(html);
+}
 function readHTML(html) {
     let metas = /^(\s*<meta [^>]*>)*/.exec(html);
     if (metas)
@@ -2769,7 +3015,7 @@ function readHTML(html) {
     let firstTag = /<([a-z][^>\s]+)/i.exec(html), wrap;
     if (wrap = firstTag && wrapMap[firstTag[1].toLowerCase()])
         html = wrap.map(n => "<" + n + ">").join("") + html + wrap.map(n => "</" + n + ">").reverse().join("");
-    elt.innerHTML = html;
+    elt.innerHTML = maybeWrapTrusted(html);
     if (wrap)
         for (let i = 0; i < wrap.length; i++)
             elt = elt.querySelector(wrap[i]) || elt;
@@ -2828,11 +3074,15 @@ class InputState {
         this.lastIOSEnterFallbackTimeout = -1;
         this.lastFocus = 0;
         this.lastTouch = 0;
-        this.lastAndroidDelete = 0;
+        this.lastChromeDelete = 0;
         this.composing = false;
+        this.compositionNode = null;
         this.composingTimeout = -1;
         this.compositionNodes = [];
         this.compositionEndedAt = -2e8;
+        this.compositionID = 1;
+        // Set to a composition ID when there are pending changes at compositionend
+        this.compositionPendingChanges = 0;
         this.domChangeCount = 0;
         this.eventHandlers = Object.create(null);
         this.hideSelectionGuard = null;
@@ -2945,7 +3195,7 @@ editHandlers.keypress = (view, _event) => {
     let sel = view.state.selection;
     if (!(sel instanceof TextSelection) || !sel.$from.sameParent(sel.$to)) {
         let text = String.fromCharCode(event.charCode);
-        if (!view.someProp("handleTextInput", f => f(view, sel.$from.pos, sel.$to.pos, text)))
+        if (!/[\r\n]/.test(text) && !view.someProp("handleTextInput", f => f(view, sel.$from.pos, sel.$to.pos, text)))
             view.dispatch(view.state.tr.insertText(text).scrollIntoView());
         event.preventDefault();
     }
@@ -2969,9 +3219,10 @@ function runHandlerOnContext(view, propName, pos, inside, event) {
 function updateSelection(view, selection, origin) {
     if (!view.focused)
         view.focus();
+    if (view.state.selection.eq(selection))
+        return;
     let tr = view.state.tr.setSelection(selection);
-    if (origin == "pointer")
-        tr.setMeta("pointer", true);
+    tr.setMeta("pointer", true);
     view.dispatch(tr);
 }
 function selectClickedLeaf(view, inside) {
@@ -2979,7 +3230,7 @@ function selectClickedLeaf(view, inside) {
         return false;
     let $pos = view.state.doc.resolve(inside), node = $pos.nodeAfter;
     if (node && node.isAtom && NodeSelection.isSelectable(node)) {
-        updateSelection(view, new NodeSelection($pos), "pointer");
+        updateSelection(view, new NodeSelection($pos));
         return true;
     }
     return false;
@@ -3003,7 +3254,7 @@ function selectClickedNode(view, inside) {
         }
     }
     if (selectAt != null) {
-        updateSelection(view, NodeSelection.create(view.state.doc, selectAt), "pointer");
+        updateSelection(view, NodeSelection.create(view.state.doc, selectAt));
         return true;
     }
     else {
@@ -3030,7 +3281,7 @@ function defaultTripleClick(view, inside, event) {
     let doc = view.state.doc;
     if (inside == -1) {
         if (doc.inlineContent) {
-            updateSelection(view, TextSelection.create(doc, 0, doc.content.size), "pointer");
+            updateSelection(view, TextSelection.create(doc, 0, doc.content.size));
             return true;
         }
         return false;
@@ -3040,9 +3291,9 @@ function defaultTripleClick(view, inside, event) {
         let node = i > $pos.depth ? $pos.nodeAfter : $pos.node(i);
         let nodePos = $pos.before(i);
         if (node.inlineContent)
-            updateSelection(view, TextSelection.create(doc, nodePos + 1, nodePos + 1 + node.content.size), "pointer");
+            updateSelection(view, TextSelection.create(doc, nodePos + 1, nodePos + 1 + node.content.size));
         else if (NodeSelection.isSelectable(node))
-            updateSelection(view, NodeSelection.create(doc, nodePos), "pointer");
+            updateSelection(view, NodeSelection.create(doc, nodePos));
         else
             continue;
         return true;
@@ -3102,7 +3353,7 @@ class MouseDown {
         }
         const target = flushed ? null : event.target;
         const targetDesc = target ? view.docView.nearestDesc(target, true) : null;
-        this.target = targetDesc ? targetDesc.dom : null;
+        this.target = targetDesc && targetDesc.dom.nodeType == 1 ? targetDesc.dom : null;
         let { selection } = view.state;
         if (event.button == 0 &&
             targetNode.type.spec.draggable && targetNode.type.spec.selectable !== false ||
@@ -3170,7 +3421,7 @@ class MouseDown {
                 // works around that.
                 (chrome && !this.view.state.selection.visible &&
                     Math.min(Math.abs(pos.pos - this.view.state.selection.from), Math.abs(pos.pos - this.view.state.selection.to)) <= 2))) {
-            updateSelection(this.view, Selection.near(this.view.state.doc.resolve(pos.pos)), "pointer");
+            updateSelection(this.view, Selection.near(this.view.state.doc.resolve(pos.pos)));
             event.preventDefault();
         }
         else {
@@ -3223,8 +3474,8 @@ const timeoutComposition = android ? 5000 : -1;
 editHandlers.compositionstart = editHandlers.compositionupdate = view => {
     if (!view.composing) {
         view.domObserver.flush();
-        let { state } = view, $pos = state.selection.$from;
-        if (state.selection.empty &&
+        let { state } = view, $pos = state.selection.$to;
+        if (state.selection instanceof TextSelection &&
             (state.storedMarks ||
                 (!$pos.textOffset && $pos.parentOffset && $pos.nodeBefore.marks.some(m => m.type.spec.inclusive === false)))) {
             // Need to wrap the cursor in mark nodes different from the ones in the DOM context
@@ -3233,7 +3484,7 @@ editHandlers.compositionstart = editHandlers.compositionupdate = view => {
             view.markCursor = null;
         }
         else {
-            endComposition(view);
+            endComposition(view, !state.selection.empty);
             // In firefox, if the cursor is after but outside a marked node,
             // the inserted text won't inherit the marks. So this moves it
             // inside if necessary.
@@ -3244,7 +3495,9 @@ editHandlers.compositionstart = editHandlers.compositionupdate = view => {
                     if (!before)
                         break;
                     if (before.nodeType == 3) {
-                        view.domSelection().collapse(before, before.nodeValue.length);
+                        let sel = view.domSelection();
+                        if (sel)
+                            sel.collapse(before, before.nodeValue.length);
                         break;
                     }
                     else {
@@ -3262,6 +3515,11 @@ editHandlers.compositionend = (view, event) => {
     if (view.composing) {
         view.input.composing = false;
         view.input.compositionEndedAt = event.timeStamp;
+        view.input.compositionPendingChanges = view.domObserver.pendingRecords().length ? view.input.compositionID : 0;
+        view.input.compositionNode = null;
+        if (view.input.compositionPendingChanges)
+            Promise.resolve().then(() => view.domObserver.flush());
+        view.input.compositionID++;
         scheduleComposeEnd(view, 20);
     }
 };
@@ -3278,21 +3536,44 @@ function clearComposition(view) {
     while (view.input.compositionNodes.length > 0)
         view.input.compositionNodes.pop().markParentsDirty();
 }
+function findCompositionNode(view) {
+    let sel = view.domSelectionRange();
+    if (!sel.focusNode)
+        return null;
+    let textBefore = textNodeBefore$1(sel.focusNode, sel.focusOffset);
+    let textAfter = textNodeAfter$1(sel.focusNode, sel.focusOffset);
+    if (textBefore && textAfter && textBefore != textAfter) {
+        let descAfter = textAfter.pmViewDesc, lastChanged = view.domObserver.lastChangedTextNode;
+        if (textBefore == lastChanged || textAfter == lastChanged)
+            return lastChanged;
+        if (!descAfter || !descAfter.isText(textAfter.nodeValue)) {
+            return textAfter;
+        }
+        else if (view.input.compositionNode == textAfter) {
+            let descBefore = textBefore.pmViewDesc;
+            if (!(!descBefore || !descBefore.isText(textBefore.nodeValue)))
+                return textAfter;
+        }
+    }
+    return textBefore || textAfter;
+}
 function timestampFromCustomEvent() {
     let event = document.createEvent("Event");
     event.initEvent("event", true, true);
     return event.timeStamp;
 }
 /// @internal
-function endComposition(view, forceUpdate = false) {
+function endComposition(view, restarting = false) {
     if (android && view.domObserver.flushingSoon >= 0)
         return;
     view.domObserver.forceFlush();
     clearComposition(view);
-    if (forceUpdate || view.docView && view.docView.dirty) {
+    if (restarting || view.docView && view.docView.dirty) {
         let sel = selectionFromDOM(view);
         if (sel && !sel.eq(view.state.selection))
             view.dispatch(view.state.tr.setSelection(sel));
+        else if ((view.markCursor || restarting) && !view.state.selection.empty)
+            view.dispatch(view.state.tr.deleteSelection());
         else
             view.updateState(view.state);
         return true;
@@ -3359,29 +3640,37 @@ function capturePaste(view, event) {
         target.contentEditable = "true";
     target.style.cssText = "position: fixed; left: -10000px; top: 10px";
     target.focus();
+    let plain = view.input.shiftKey && view.input.lastKeyCode != 45;
     setTimeout(() => {
         view.focus();
         if (target.parentNode)
             target.parentNode.removeChild(target);
         if (plainText)
-            doPaste(view, target.value, null, event);
+            doPaste(view, target.value, null, plain, event);
         else
-            doPaste(view, target.textContent, target.innerHTML, event);
+            doPaste(view, target.textContent, target.innerHTML, plain, event);
     }, 50);
 }
-function doPaste(view, text, html, event) {
+function doPaste(view, text, html, preferPlain, event) {
     // @ts-ignore
-    let slice = parseFromClipboard(view, text, html, view.someProp("plainTextPaste") || view.input.shiftKey, view.state.selection.$from);
+    let slice = parseFromClipboard(view, text, html, view.someProp("plainTextPaste") || preferPlain, view.state.selection.$from);
     if (view.someProp("handlePaste", f => f(view, event, slice || Slice.empty)))
         return true;
     if (!slice)
         return false;
     let singleNode = sliceSingleNode(slice);
     let tr = singleNode
-        ? view.state.tr.replaceSelectionWith(singleNode, view.input.shiftKey)
+        ? view.state.tr.replaceSelectionWith(singleNode, preferPlain)
         : view.state.tr.replaceSelection(slice);
     view.dispatch(tr.scrollIntoView().setMeta("paste", true).setMeta("uiEvent", "paste"));
     return true;
+}
+function getText(clipboardData) {
+    let text = clipboardData.getData("text/plain") || clipboardData.getData("Text");
+    if (text)
+        return text;
+    let uris = clipboardData.getData("text/uri-list");
+    return uris ? uris.replace(/\r?\n/g, " ") : "";
 }
 editHandlers.paste = (view, _event) => {
     let event = _event;
@@ -3392,15 +3681,17 @@ editHandlers.paste = (view, _event) => {
     if (view.composing && !android)
         return;
     let data = brokenClipboardAPI ? null : event.clipboardData;
-    if (data && doPaste(view, data.getData("text/plain"), data.getData("text/html"), event))
+    let plain = view.input.shiftKey && view.input.lastKeyCode != 45;
+    if (data && doPaste(view, getText(data), data.getData("text/html"), plain, event))
         event.preventDefault();
     else
         capturePaste(view, event);
 };
 class Dragging {
-    constructor(slice, move) {
+    constructor(slice, move, node) {
         this.slice = slice;
         this.move = move;
+        this.node = node;
     }
 }
 const dragCopyModifier = mac ? "altKey" : "ctrlKey";
@@ -3413,23 +3704,27 @@ handlers.dragstart = (view, _event) => {
         return;
     let sel = view.state.selection;
     let pos = sel.empty ? null : view.posAtCoords(eventCoords(event));
+    let node;
     if (pos && pos.pos >= sel.from && pos.pos <= (sel instanceof NodeSelection ? sel.to - 1 : sel.to)) ;
     else if (mouseDown && mouseDown.mightDrag) {
-        view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, mouseDown.mightDrag.pos)));
+        node = NodeSelection.create(view.state.doc, mouseDown.mightDrag.pos);
     }
     else if (event.target && event.target.nodeType == 1) {
         let desc = view.docView.nearestDesc(event.target, true);
         if (desc && desc.node.type.spec.draggable && desc != view.docView)
-            view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, desc.posBefore)));
+            node = NodeSelection.create(view.state.doc, desc.posBefore);
     }
-    let slice = view.state.selection.content(), { dom, text } = serializeForClipboard(view, slice);
-    event.dataTransfer.clearData();
+    let draggedSlice = (node || view.state.selection).content();
+    let { dom, text, slice } = serializeForClipboard(view, draggedSlice);
+    // Pre-120 Chrome versions clear files when calling `clearData` (#1472)
+    if (!event.dataTransfer.files.length || !chrome || chrome_version > 120)
+        event.dataTransfer.clearData();
     event.dataTransfer.setData(brokenClipboardAPI ? "Text" : "text/html", dom.innerHTML);
     // See https://github.com/ProseMirror/prosemirror/issues/1156
     event.dataTransfer.effectAllowed = "copyMove";
     if (!brokenClipboardAPI)
         event.dataTransfer.setData("text/plain", text);
-    view.dragging = new Dragging(slice, !event[dragCopyModifier]);
+    view.dragging = new Dragging(slice, !event[dragCopyModifier], node);
 };
 handlers.dragend = view => {
     let dragging = view.dragging;
@@ -3454,7 +3749,7 @@ editHandlers.drop = (view, _event) => {
         view.someProp("transformPasted", f => { slice = f(slice, view); });
     }
     else {
-        slice = parseFromClipboard(view, event.dataTransfer.getData(brokenClipboardAPI ? "Text" : "text/plain"), brokenClipboardAPI ? null : event.dataTransfer.getData("text/html"), false, $mouse);
+        slice = parseFromClipboard(view, getText(event.dataTransfer), brokenClipboardAPI ? null : event.dataTransfer.getData("text/html"), false, $mouse);
     }
     let move = !!(dragging && !event[dragCopyModifier]);
     if (view.someProp("handleDrop", f => f(view, event, slice || Slice.empty, move))) {
@@ -3468,8 +3763,13 @@ editHandlers.drop = (view, _event) => {
     if (insertPos == null)
         insertPos = $mouse.pos;
     let tr = view.state.tr;
-    if (move)
-        tr.deleteSelection();
+    if (move) {
+        let { node } = dragging;
+        if (node)
+            node.replace(tr);
+        else
+            tr.deleteSelection();
+    }
     let pos = tr.mapping.map(insertPos);
     let isNode = slice.openStart == 0 && slice.openEnd == 0 && slice.content.childCount == 1;
     let beforeInsert = tr.doc;
@@ -3675,6 +3975,8 @@ class Decoration {
     get spec() { return this.type.spec; }
     /// @internal
     get inline() { return this.type instanceof InlineType; }
+    /// @internal
+    get widget() { return this.type instanceof WidgetType; }
 }
 const none = [], noSpec = {};
 /// A collection of [decorations](#view.Decoration), organized in such
@@ -3688,7 +3990,8 @@ class DecorationSet {
         this.children = children.length ? children : none;
     }
     /// Create a set of decorations, using the structure of the given
-    /// document.
+    /// document. This will consume (modify) the `decorations` array, so
+    /// you must make a copy if you want need to preserve that.
     static create(doc, decorations) {
         return decorations.length ? buildTree(decorations, doc, 0, noSpec) : empty;
     }
@@ -3739,8 +4042,9 @@ class DecorationSet {
             return newLocal ? new DecorationSet(newLocal.sort(byPos), none) : empty;
     }
     /// Add the given array of decorations to the ones in the set,
-    /// producing a new set. Needs access to the current document to
-    /// create the appropriate tree structure.
+    /// producing a new set. Consumes the `decorations` array. Needs
+    /// access to the current document to create the appropriate tree
+    /// structure.
     add(doc, decorations) {
         if (!decorations.length)
             return this;
@@ -3816,7 +4120,6 @@ class DecorationSet {
             return this;
         return local.length || children.length ? new DecorationSet(local, children) : empty;
     }
-    /// @internal
     forChild(offset, node) {
         if (this == empty)
             return this;
@@ -3879,6 +4182,7 @@ class DecorationSet {
         }
         return result;
     }
+    forEachSet(f) { f(this); }
 }
 /// The empty set of decorations.
 DecorationSet.empty = new DecorationSet([], []);
@@ -3946,8 +4250,13 @@ class DecorationGroup {
         switch (members.length) {
             case 0: return empty;
             case 1: return members[0];
-            default: return new DecorationGroup(members);
+            default: return new DecorationGroup(members.every(m => m instanceof DecorationSet) ? members :
+                members.reduce((r, m) => r.concat(m instanceof DecorationSet ? m : m.members), []));
         }
+    }
+    forEachSet(f) {
+        for (let i = 0; i < this.members.length; i++)
+            this.members[i].forEachSet(f);
     }
 }
 function mapChildren(oldChildren, newLocal, mapping, node, offset, oldOffset, options) {
@@ -3966,7 +4275,7 @@ function mapChildren(oldChildren, newLocal, mapping, node, offset, oldOffset, op
                 if (oldEnd >= start) {
                     children[i + 1] = oldStart <= start ? -2 : -1;
                 }
-                else if (newStart >= offset && dSize) {
+                else if (oldStart >= baseOffset && dSize) {
                     children[i] += dSize;
                     children[i + 1] += dSize;
                 }
@@ -4203,6 +4512,7 @@ class DOMObserver {
         this.currentSelection = new SelectionState;
         this.onCharData = null;
         this.suppressingSelectionUpdates = false;
+        this.lastChangedTextNode = null;
         this.observer = window.MutationObserver &&
             new window.MutationObserver(mutations => {
                 for (let i = 0; i < mutations.length; i++)
@@ -4308,15 +4618,19 @@ class DOMObserver {
             return true;
         }
     }
+    pendingRecords() {
+        if (this.observer)
+            for (let mut of this.observer.takeRecords())
+                this.queue.push(mut);
+        return this.queue;
+    }
     flush() {
         let { view } = this;
         if (!view.docView || this.flushingSoon > -1)
             return;
-        let mutations = this.observer ? this.observer.takeRecords() : [];
-        if (this.queue.length) {
-            mutations = this.queue.concat(mutations);
-            this.queue.length = 0;
-        }
+        let mutations = this.pendingRecords();
+        if (mutations.length)
+            this.queue = [];
         let sel = view.domSelectionRange();
         let newSel = !this.suppressingSelectionUpdates && !this.currentSelection.eq(sel) && hasFocusAndSelection(view) && !this.ignoreSelectionChange(sel);
         let from = -1, to = -1, typeOver = false, added = [];
@@ -4331,14 +4645,22 @@ class DOMObserver {
                 }
             }
         }
-        if (gecko && added.length > 1) {
+        if (gecko && added.length) {
             let brs = added.filter(n => n.nodeName == "BR");
             if (brs.length == 2) {
-                let a = brs[0], b = brs[1];
+                let [a, b] = brs;
                 if (a.parentNode && a.parentNode.parentNode == b.parentNode)
                     b.remove();
                 else
                     a.remove();
+            }
+            else {
+                let { focusNode } = this.currentSelection;
+                for (let br of brs) {
+                    let parent = br.parentNode;
+                    if (parent && parent.nodeName == "LI" && (!focusNode || blockParent(view, focusNode) != parent))
+                        br.remove();
+                }
             }
         }
         let readSel = null;
@@ -4346,7 +4668,7 @@ class DOMObserver {
         // start of the document after focus, restore the selection from
         // the state
         if (from < 0 && newSel && view.input.lastFocus > Date.now() - 200 &&
-            view.input.lastTouch < Date.now() - 300 &&
+            Math.max(view.input.lastTouch, view.input.lastClick.time) < Date.now() - 300 &&
             selectionCollapsed(sel) && (readSel = selectionFromDOM(view)) &&
             readSel.eq(Selection.near(view.state.doc.resolve(0), 1))) {
             view.input.lastFocus = 0;
@@ -4380,8 +4702,12 @@ class DOMObserver {
         if (!desc || desc.ignoreMutation(mut))
             return null;
         if (mut.type == "childList") {
-            for (let i = 0; i < mut.addedNodes.length; i++)
-                added.push(mut.addedNodes[i]);
+            for (let i = 0; i < mut.addedNodes.length; i++) {
+                let node = mut.addedNodes[i];
+                added.push(node);
+                if (node.nodeType == 3)
+                    this.lastChangedTextNode = node;
+            }
             if (desc.contentDOM && desc.contentDOM != desc.dom && !desc.contentDOM.contains(mut.target))
                 return { from: desc.posBefore, to: desc.posAfter };
             let prev = mut.previousSibling, next = mut.nextSibling;
@@ -4408,6 +4734,7 @@ class DOMObserver {
             return { from: desc.posAtStart - desc.border, to: desc.posAtEnd + desc.border };
         }
         else { // "characterData"
+            this.lastChangedTextNode = mut.target;
             return {
                 from: desc.posAtStart,
                 to: desc.posAtEnd,
@@ -4434,9 +4761,25 @@ function checkCSS(view) {
         cssCheckWarned = true;
     }
 }
+function rangeToSelectionRange(view, range) {
+    let anchorNode = range.startContainer, anchorOffset = range.startOffset;
+    let focusNode = range.endContainer, focusOffset = range.endOffset;
+    let currentAnchor = view.domAtPos(view.state.selection.anchor);
+    // Since such a range doesn't distinguish between anchor and head,
+    // use a heuristic that flips it around if its end matches the
+    // current anchor.
+    if (isEquivalentPosition(currentAnchor.node, currentAnchor.offset, focusNode, focusOffset))
+        [anchorNode, anchorOffset, focusNode, focusOffset] = [focusNode, focusOffset, anchorNode, anchorOffset];
+    return { anchorNode, anchorOffset, focusNode, focusOffset };
+}
 // Used to work around a Safari Selection/shadow DOM bug
 // Based on https://github.com/codemirror/dev/issues/414 fix
-function safariShadowSelectionRange(view) {
+function safariShadowSelectionRange(view, selection) {
+    if (selection.getComposedRanges) {
+        let range = selection.getComposedRanges(view.root)[0];
+        if (range)
+            return rangeToSelectionRange(view, range);
+    }
     let found;
     function read(event) {
         event.preventDefault();
@@ -4451,15 +4794,15 @@ function safariShadowSelectionRange(view) {
     view.dom.addEventListener("beforeinput", read, true);
     document.execCommand("indent");
     view.dom.removeEventListener("beforeinput", read, true);
-    let anchorNode = found.startContainer, anchorOffset = found.startOffset;
-    let focusNode = found.endContainer, focusOffset = found.endOffset;
-    let currentAnchor = view.domAtPos(view.state.selection.anchor);
-    // Since such a range doesn't distinguish between anchor and head,
-    // use a heuristic that flips it around if its end matches the
-    // current anchor.
-    if (isEquivalentPosition(currentAnchor.node, currentAnchor.offset, focusNode, focusOffset))
-        [anchorNode, anchorOffset, focusNode, focusOffset] = [focusNode, focusOffset, anchorNode, anchorOffset];
-    return { anchorNode, anchorOffset, focusNode, focusOffset };
+    return found ? rangeToSelectionRange(view, found) : null;
+}
+function blockParent(view, node) {
+    for (let p = node.parentNode; p && p != view.dom; p = p.parentNode) {
+        let desc = view.docView.nearestDesc(p, true);
+        if (desc && desc.node.isBlock)
+            return p;
+    }
+    return null;
 }
 
 // Note that all referencing and parsing is done with the
@@ -4535,16 +4878,25 @@ function ruleFromNode(dom) {
     }
     return null;
 }
+const isInline = /^(a|abbr|acronym|b|bd[io]|big|br|button|cite|code|data(list)?|del|dfn|em|i|ins|kbd|label|map|mark|meter|output|q|ruby|s|samp|small|span|strong|su[bp]|time|u|tt|var)$/i;
 function readDOMChange(view, from, to, typeOver, addedNodes) {
+    let compositionID = view.input.compositionPendingChanges || (view.composing ? view.input.compositionID : 0);
+    view.input.compositionPendingChanges = 0;
     if (from < 0) {
         let origin = view.input.lastSelectionTime > Date.now() - 50 ? view.input.lastSelectionOrigin : null;
         let newSel = selectionFromDOM(view, origin);
         if (newSel && !view.state.selection.eq(newSel)) {
+            if (chrome && android &&
+                view.input.lastKeyCode === 13 && Date.now() - 100 < view.input.lastKeyCodeTime &&
+                view.someProp("handleKeyDown", f => f(view, keyEvent(13, "Enter"))))
+                return;
             let tr = view.state.tr.setSelection(newSel);
             if (origin == "pointer")
                 tr.setMeta("pointer", true);
             else if (origin == "key")
                 tr.scrollIntoView();
+            if (compositionID)
+                tr.setMeta("composition", compositionID);
             view.dispatch(tr);
         }
         return;
@@ -4568,8 +4920,10 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
     }
     view.input.lastKeyCode = null;
     let change = findDiff(compare.content, parse.doc.content, parse.from, preferredPos, preferredSide);
+    if (change)
+        view.input.domChangeCount++;
     if ((ios && view.input.lastIOSEnter > Date.now() - 225 || android) &&
-        addedNodes.some(n => n.nodeName == "DIV" || n.nodeName == "P" || n.nodeName == "LI") &&
+        addedNodes.some(n => n.nodeType == 1 && !isInline.test(n.nodeName)) &&
         (!change || change.endA >= change.endB) &&
         view.someProp("handleKeyDown", f => f(view, keyEvent(13, "Enter")))) {
         view.input.lastIOSEnter = 0;
@@ -4583,20 +4937,16 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
         else {
             if (parse.sel) {
                 let sel = resolveSelection(view, view.state.doc, parse.sel);
-                if (sel && !sel.eq(view.state.selection))
-                    view.dispatch(view.state.tr.setSelection(sel));
+                if (sel && !sel.eq(view.state.selection)) {
+                    let tr = view.state.tr.setSelection(sel);
+                    if (compositionID)
+                        tr.setMeta("composition", compositionID);
+                    view.dispatch(tr);
+                }
             }
             return;
         }
     }
-    // Chrome sometimes leaves the cursor before the inserted text when
-    // composing after a cursor wrapper. This moves it forward.
-    if (chrome && view.cursorWrapper && parse.sel && parse.sel.anchor == view.cursorWrapper.deco.from &&
-        parse.sel.head == parse.sel.anchor) {
-        let size = change.endB - change.start;
-        parse.sel = { anchor: parse.sel.anchor + size, head: parse.sel.anchor + size };
-    }
-    view.input.domChangeCount++;
     // Handle the case where overwriting a selection by typing matches
     // the start or end of the selected content, creating a change
     // that's smaller than what was actually overwritten.
@@ -4632,7 +4982,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
     // as being an iOS enter press), just dispatch an Enter key instead.
     if (((ios && view.input.lastIOSEnter > Date.now() - 225 &&
         (!inlineChange || addedNodes.some(n => n.nodeName == "DIV" || n.nodeName == "P"))) ||
-        (!inlineChange && $from.pos < parse.doc.content.size &&
+        (!inlineChange && $from.pos < parse.doc.content.size && !$from.sameParent($to) &&
             (nextSel = Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) &&
             nextSel.head == $to.pos)) &&
         view.someProp("handleKeyDown", f => f(view, keyEvent(13, "Enter")))) {
@@ -4641,17 +4991,17 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
     }
     // Same for backspace
     if (view.state.selection.anchor > change.start &&
-        looksLikeJoin(doc, change.start, change.endA, $from, $to) &&
+        looksLikeBackspace(doc, change.start, change.endA, $from, $to) &&
         view.someProp("handleKeyDown", f => f(view, keyEvent(8, "Backspace")))) {
         if (android && chrome)
             view.domObserver.suppressSelectionUpdates(); // #820
         return;
     }
-    // Chrome Android will occasionally, during composition, delete the
+    // Chrome will occasionally, during composition, delete the
     // entire composition and then immediately insert it again. This is
     // used to detect that situation.
-    if (chrome && android && change.endB == change.start)
-        view.input.lastAndroidDelete = Date.now();
+    if (chrome && change.endB == change.start)
+        view.input.lastChromeDelete = Date.now();
     // This tries to detect Android virtual keyboard
     // enter-and-pick-suggestion action. That sometimes (see issue
     // #1059) first fires a DOM mutation, before moving the selection to
@@ -4702,19 +5052,21 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
         tr = view.state.tr.replace(chFrom, chTo, parse.doc.slice(change.start - parse.from, change.endB - parse.from));
     if (parse.sel) {
         let sel = resolveSelection(view, tr.doc, parse.sel);
-        // Chrome Android will sometimes, during composition, report the
+        // Chrome will sometimes, during composition, report the
         // selection in the wrong place. If it looks like that is
         // happening, don't update the selection.
         // Edge just doesn't move the cursor forward when you start typing
         // in an empty block or between br nodes.
-        if (sel && !(chrome && android && view.composing && sel.empty &&
-            (change.start != change.endB || view.input.lastAndroidDelete < Date.now() - 100) &&
+        if (sel && !(chrome && view.composing && sel.empty &&
+            (change.start != change.endB || view.input.lastChromeDelete < Date.now() - 100) &&
             (sel.head == chFrom || sel.head == tr.mapping.map(chTo) - 1) ||
             ie && sel.empty && sel.head == chFrom))
             tr.setSelection(sel);
     }
     if (storedMarks)
         tr.ensureMarks(storedMarks);
+    if (compositionID)
+        tr.setMeta("composition", compositionID);
     view.dispatch(tr.scrollIntoView());
 }
 function resolveSelection(view, doc, parsedSel) {
@@ -4751,14 +5103,18 @@ function isMarkChange(cur, prev) {
     if (Fragment.from(updated).eq(cur))
         return { mark, type };
 }
-function looksLikeJoin(old, start, end, $newStart, $newEnd) {
-    if (!$newStart.parent.isTextblock ||
-        // The content must have shrunk
-        end - start <= $newEnd.pos - $newStart.pos ||
+function looksLikeBackspace(old, start, end, $newStart, $newEnd) {
+    if ( // The content must have shrunk
+    end - start <= $newEnd.pos - $newStart.pos ||
         // newEnd must point directly at or after the end of the block that newStart points into
         skipClosingAndOpening($newStart, true, false) < $newEnd.pos)
         return false;
     let $start = old.resolve(start);
+    // Handle the case where, rather than joining blocks, the change just removed an entire block
+    if (!$newStart.parent.isTextblock) {
+        let after = $start.nodeAfter;
+        return after != null && end == start + after.nodeSize;
+    }
     // Start must be at the end of a block
     if ($start.parentOffset < $start.parent.content.size || !$start.parent.isTextblock)
         return false;
@@ -4798,16 +5154,26 @@ function findDiff(a, b, pos, preferredPos, preferredSide) {
     if (endA < start && a.size < b.size) {
         let move = preferredPos <= start && preferredPos >= endA ? start - preferredPos : 0;
         start -= move;
+        if (start && start < b.size && isSurrogatePair(b.textBetween(start - 1, start + 1)))
+            start += move ? 1 : -1;
         endB = start + (endB - endA);
         endA = start;
     }
     else if (endB < start) {
         let move = preferredPos <= start && preferredPos >= endB ? start - preferredPos : 0;
         start -= move;
+        if (start && start < a.size && isSurrogatePair(a.textBetween(start - 1, start + 1)))
+            start += move ? 1 : -1;
         endA = start + (endA - endB);
         endB = start;
     }
     return { start, endA, endB };
+}
+function isSurrogatePair(str) {
+    if (str.length != 2)
+        return false;
+    let a = str.charCodeAt(0), b = str.charCodeAt(1);
+    return a >= 0xDC00 && a <= 0xDFFF && b >= 0xD800 && b <= 0xDBFF;
 }
 
 /// @internal
@@ -4920,6 +5286,7 @@ class EditorView {
         this.updateStateInner(state, this._props);
     }
     updateStateInner(state, prevProps) {
+        var _a;
         let prev = this.state, redraw = false, updateSel = false;
         // When stored marks are added, stop composition, so that they can
         // be displayed.
@@ -4967,8 +5334,10 @@ class EditorView {
                 // tracks that and forces a selection reset when our update
                 // did write to the node.
                 let chromeKludge = chrome ? (this.trackWrites = this.domSelectionRange().focusNode) : null;
+                if (this.composing)
+                    this.input.compositionNode = findCompositionNode(this);
                 if (redraw || !this.docView.update(state.doc, outerDeco, innerDeco, this)) {
-                    this.docView.updateOuterDeco([]);
+                    this.docView.updateOuterDeco(outerDeco);
                     this.docView.destroy();
                     this.docView = docViewDesc(state.doc, outerDeco, innerDeco, this.dom, this);
                 }
@@ -4991,6 +5360,8 @@ class EditorView {
             this.domObserver.start();
         }
         this.updatePluginViews(prev);
+        if (((_a = this.dragging) === null || _a === undefined ? undefined : _a.node) && !prev.doc.eq(state.doc))
+            this.updateDraggedNode(this.dragging, prev);
         if (scroll == "reset") {
             this.dom.scrollTop = 0;
         }
@@ -5042,6 +5413,19 @@ class EditorView {
                     pluginView.update(this, prevState);
             }
         }
+    }
+    updateDraggedNode(dragging, prev) {
+        let sel = dragging.node, found = -1;
+        if (this.state.doc.nodeAt(sel.from) == sel.node) {
+            found = sel.from;
+        }
+        else {
+            let movedPos = sel.from + (this.state.doc.content.size - prev.doc.content.size);
+            let moved = movedPos > 0 && this.state.doc.nodeAt(movedPos);
+            if (moved == sel.node)
+                found = movedPos;
+        }
+        this.dragging = new Dragging(dragging.slice, dragging.move, found < 0 ? undefined : NodeSelection.create(this.state.doc, found));
     }
     someProp(propName, f) {
         let prop = this._props && this._props[propName], value;
@@ -5105,6 +5489,11 @@ class EditorView {
                 }
             }
         return cached || document;
+    }
+    /// When an existing editor view is moved to a new document or
+    /// shadow tree, call this to make it recompute its root.
+    updateRoot() {
+        this._root = null;
     }
     /// Given a pair of viewport coordinates, return the document
     /// position that corresponds to them. May return null if the given
@@ -5171,6 +5560,16 @@ class EditorView {
     endOfTextblock(dir, state) {
         return endOfTextblock(this, state || this.state, dir);
     }
+    /// Run the editor's paste logic with the given HTML string. The
+    /// `event`, if given, will be passed to the
+    /// [`handlePaste`](#view.EditorProps.handlePaste) hook.
+    pasteHTML(html, event) {
+        return doPaste(this, "", html, false, event || new ClipboardEvent("paste"));
+    }
+    /// Run the editor's paste logic with the given plain-text input.
+    pasteText(text, event) {
+        return doPaste(this, text, null, true, event || new ClipboardEvent("paste"));
+    }
     /// Removes the editor from the DOM and destroys all [node
     /// views](#view.NodeView).
     destroy() {
@@ -5187,6 +5586,7 @@ class EditorView {
         }
         this.docView.destroy();
         this.docView = null;
+        clearReusedRange();
     }
     /// This is true when the view has been
     /// [destroyed](#view.EditorView.destroy) (and thus should not be
@@ -5214,8 +5614,11 @@ class EditorView {
     }
     /// @internal
     domSelectionRange() {
-        return safari && this.root.nodeType === 11 && deepActiveElement(this.dom.ownerDocument) == this.dom
-            ? safariShadowSelectionRange(this) : this.domSelection();
+        let sel = this.domSelection();
+        if (!sel)
+            return { focusNode: null, focusOffset: 0, anchorNode: null, anchorOffset: 0 };
+        return safari && this.root.nodeType === 11 &&
+            deepActiveElement(this.dom.ownerDocument) == this.dom && safariShadowSelectionRange(this, sel) || sel;
     }
     /// @internal
     domSelection() {
@@ -5226,7 +5629,6 @@ function computeDocDeco(view) {
     let attrs = Object.create(null);
     attrs.class = "ProseMirror";
     attrs.contenteditable = String(view.editable);
-    attrs.translate = "no";
     view.someProp("attributes", value => {
         if (typeof value == "function")
             value = value(view.state);
@@ -5234,13 +5636,14 @@ function computeDocDeco(view) {
             for (let attr in value) {
                 if (attr == "class")
                     attrs.class += " " + value[attr];
-                if (attr == "style") {
+                else if (attr == "style")
                     attrs.style = (attrs.style ? attrs.style + ";" : "") + value[attr];
-                }
                 else if (!attrs[attr] && attr != "contenteditable" && attr != "nodeName")
                     attrs[attr] = String(value[attr]);
             }
     });
+    if (!attrs.translate)
+        attrs.translate = "no";
     return [Decoration.node(0, view.state.doc.content.size, attrs)];
 }
 function updateCursorWrapper(view) {
@@ -5249,7 +5652,7 @@ function updateCursorWrapper(view) {
         dom.className = "ProseMirror-separator";
         dom.setAttribute("mark-placeholder", "true");
         dom.setAttribute("alt", "");
-        view.cursorWrapper = { dom, deco: Decoration.widget(view.state.selection.head, dom, { raw: true, marks: view.markCursor }) };
+        view.cursorWrapper = { dom, deco: Decoration.widget(view.state.selection.from, dom, { raw: true, marks: view.markCursor }) };
     }
     else {
         view.cursorWrapper = null;
