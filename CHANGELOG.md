@@ -1,3 +1,93 @@
+## 1.37.1 (2024-12-11)
+
+### Bug fixes
+
+Fix an issue where `display: content` elements could break `posAtCoords`.
+
+Work around an issue with Chrome reporting the selection incorrectly during composition.
+
+## 1.37.0 (2024-11-23)
+
+### Bug fixes
+
+Fix an issue on Safari where the (incorrect) top-level selection was used, instead of the workaround that also works inside shadow roots.
+
+### New features
+
+Mark views can now provide an `ignoreMutation` method. Add ViewMutationRecord to doc template
+
+## 1.36.0 (2024-11-05)
+
+### Bug fixes
+
+Don't recreated `TrustedTypePolicy` objects for every paste.
+
+### New features
+
+Add support for a `destroy` method on custom mark views. Add MarkView to the doc template
+
+## 1.35.0 (2024-10-29)
+
+### New features
+
+The new `NodeView.multiType` flag is now required to opt into handling different node types in a single node view. It used to be the default, but this tripped too many people up.
+
+## 1.34.3 (2024-09-19)
+
+### Bug fixes
+
+Fix an issue that would, during some types of document updates, leave the document DOM in an improper form.
+
+Handle the case where drag-selecting in Firefox creates a selection with multiple distinct ranges.
+
+## 1.34.2 (2024-09-03)
+
+### Bug fixes
+
+Fix pasting in Chrome with the require-trusted-types-for CSP enabled.
+
+Fix an issue where, for some kinds of IME on Windows, pressing Enter while in a composition would execute the resulting command on the wrong selection, erasing some typed content.
+
+## 1.34.1 (2024-08-26)
+
+### Bug fixes
+
+Fix null dereferences caused by the behavior of Chrome's newly supported `caretPositionFromPoint` method.
+
+Fix an issue where on Android, with GBoard, enter presses in code blocks while a spell correction was selected didn't insert a new line.
+
+## 1.34.0 (2024-08-23)
+
+### New features
+
+The `DecorationGroup` interface now has a `forEachSet` method to iterate though the contained decoration sets.
+
+## 1.33.11 (2024-08-19)
+
+### Bug fixes
+
+Delete the selection on composition start when on a mark boundary to force Chrome to apply the correct style to the composition.
+
+When the browser starts a composition and the selection spans across blocks, start by clearing it to make sure the composed text node lands in a valid position.
+
+## 1.33.10 (2024-08-13)
+
+### Bug fixes
+
+Prevent triple clicks and clicks on atom nodes from dispatching a selection update when the new selection is equal to the current selection.
+
+Don't crash when `window.getSelection()` returns null.
+
+Create a cursor wrapper when starting a composition with a selection that spans mark boundaries, to avoid odd DOM forms created by Chrome in such a situation.
+
+## 1.33.9 (2024-07-18)
+
+### Bug fixes
+
+Fix an issue where dragging an image on Chrome versions before 121 failed to put the image file in the clipboard data.
+
+Enable cross-site scripting protection hack when rendering nodes and marks inside the editor.
+
 ## 1.33.8 (2024-06-11)
 
 ### Bug fixes
@@ -1978,17 +2068,13 @@ Transactions that update the selection because of mouse or touch input now get a
 
 ## 0.16.0 (2016-12-23)
 
-### Bug fixes
-
-Solve problem where setting a node selection would trigger a DOM read, leading to the selection being reset.
-
-## 0.16.0 (2016-12-23)
-
 ### Breaking changes
 
 The `spellcheck`, `label`, and `class` props are now replaced by an [`attributes` prop](https://prosemirror.net/docs/ref/version/0.16.0.html#view.EditorProps.attributes).
 
 ### Bug fixes
+
+Solve problem where setting a node selection would trigger a DOM read, leading to the selection being reset.
 
 Ignoring/aborting an action should no longer lead to the DOM being stuck in an outdated state.
 

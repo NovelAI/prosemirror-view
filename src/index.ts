@@ -3,7 +3,7 @@ import {Slice, ResolvedPos, DOMParser, DOMSerializer, Node, Mark} from "prosemir
 
 import {scrollRectIntoView, posAtCoords, coordsAtPos, endOfTextblock, storeScrollPos,
         resetScrollPos, focusPreventScroll} from "./domcoords"
-import {docViewDesc, ViewDesc, NodeView, NodeViewDesc} from "./viewdesc"
+import {docViewDesc, ViewDesc, NodeView, NodeViewDesc, MarkView} from "./viewdesc"
 import {initInput, destroyInput, dispatchEvent, ensureListeners, clearComposition,
         InputState, doPaste, Dragging, findCompositionNode} from "./input"
 import {selectionToDOM, anchorInRightPlace, syncNodeSelection} from "./selection"
@@ -14,7 +14,7 @@ import {DOMSelection, DOMNode, DOMSelectionRange, deepActiveElement, clearReused
 import * as browser from "./browser"
 
 export {Decoration, DecorationSet, DecorationAttrs, DecorationSource} from "./decoration"
-export {NodeView} from "./viewdesc"
+export {NodeView, MarkView, ViewMutationRecord} from "./viewdesc"
 
 // Exported for testing
 import {serializeForClipboard, parseFromClipboard} from "./clipboard"
@@ -495,13 +495,14 @@ export class EditorView {
   /// @internal
   domSelectionRange(): DOMSelectionRange {
     let sel = this.domSelection()
+    if (!sel) return {focusNode: null, focusOffset: 0, anchorNode: null, anchorOffset: 0}
     return browser.safari && this.root.nodeType === 11 &&
       deepActiveElement(this.dom.ownerDocument) == this.dom && safariShadowSelectionRange(this, sel) || sel
   }
 
   /// @internal
-  domSelection(): DOMSelection {
-    return (this.root as Document).getSelection()!
+  domSelection(): DOMSelection | null {
+    return (this.root as Document).getSelection()
   }
 }
 
@@ -532,7 +533,7 @@ function updateCursorWrapper(view: EditorView) {
     dom.className = "ProseMirror-separator"
     dom.setAttribute("mark-placeholder", "true")
     dom.setAttribute("alt", "")
-    view.cursorWrapper = {dom, deco: Decoration.widget(view.state.selection.head,
+    view.cursorWrapper = {dom, deco: Decoration.widget(view.state.selection.from,
                                                        dom, {raw: true, marks: view.markCursor} as any)}
   } else {
     view.cursorWrapper = null
@@ -581,7 +582,7 @@ export type NodeViewConstructor = (node: Node, view: EditorView, getPos: () => n
 
 /// The function types [used](#view.EditorProps.markViews) to create
 /// mark views.
-export type MarkViewConstructor = (mark: Mark, view: EditorView, inline: boolean) => {dom: HTMLElement, contentDOM?: HTMLElement}
+export type MarkViewConstructor = (mark: Mark, view: EditorView, inline: boolean) => MarkView
 
 type NodeViewSet = {[name: string]: NodeViewConstructor | MarkViewConstructor}
 

@@ -28,7 +28,7 @@ export class InputState {
   lastIOSEnterFallbackTimeout = -1
   lastFocus = 0
   lastTouch = 0
-  lastAndroidDelete = 0
+  lastChromeDelete = 0
   composing = false
   compositionNode: Text | null = null
   composingTimeout = -1
@@ -183,6 +183,7 @@ function runHandlerOnContext(
 
 function updateSelection(view: EditorView, selection: Selection, origin: string) {
   if (!view.focused) view.focus()
+  if (view.state.selection.eq(selection)) return
   let tr = view.state.tr.setSelection(selection)
   if (origin == "pointer") tr.setMeta("pointer", true)
   view.dispatch(tr)
@@ -453,8 +454,8 @@ const timeoutComposition = browser.android ? 5000 : -1
 editHandlers.compositionstart = editHandlers.compositionupdate = view => {
   if (!view.composing) {
     view.domObserver.flush()
-    let {state} = view, $pos = state.selection.$from
-    if (state.selection.empty &&
+    let {state} = view, $pos = state.selection.$to
+    if (state.selection instanceof TextSelection &&
         (state.storedMarks ||
          (!$pos.textOffset && $pos.parentOffset && $pos.nodeBefore!.marks.some(m => m.type.spec.inclusive === false)))) {
       // Need to wrap the cursor in mark nodes different from the ones in the DOM context
@@ -462,7 +463,7 @@ editHandlers.compositionstart = editHandlers.compositionupdate = view => {
       endComposition(view, true)
       view.markCursor = null
     } else {
-      endComposition(view)
+      endComposition(view, !state.selection.empty)
       // In firefox, if the cursor is after but outside a marked node,
       // the inserted text won't inherit the marks. So this moves it
       // inside if necessary.
@@ -472,7 +473,8 @@ editHandlers.compositionstart = editHandlers.compositionupdate = view => {
           let before = offset < 0 ? node.lastChild : node.childNodes[offset - 1]
           if (!before) break
           if (before.nodeType == 3) {
-            view.domSelection().collapse(before, before.nodeValue!.length)
+            let sel = view.domSelection()
+            if (sel) sel.collapse(before, before.nodeValue!.length)
             break
           } else {
             node = before
@@ -537,13 +539,14 @@ function timestampFromCustomEvent() {
 }
 
 /// @internal
-export function endComposition(view: EditorView, forceUpdate = false) {
+export function endComposition(view: EditorView, restarting = false) {
   if (browser.android && view.domObserver.flushingSoon >= 0) return
   view.domObserver.forceFlush()
   clearComposition(view)
-  if (forceUpdate || view.docView && view.docView.dirty) {
+  if (restarting || view.docView && view.docView.dirty) {
     let sel = selectionFromDOM(view)
     if (sel && !sel.eq(view.state.selection)) view.dispatch(view.state.tr.setSelection(sel))
+    else if ((view.markCursor || restarting) && !view.state.selection.empty) view.dispatch(view.state.tr.deleteSelection())
     else view.updateState(view.state)
     return true
   }

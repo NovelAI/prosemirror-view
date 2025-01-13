@@ -10,15 +10,19 @@ declare global {
   interface Node { pmViewDesc?: ViewDesc }
 }
 
+/// A ViewMutationRecord represents a DOM
+/// [mutation](https://developer.mozilla.org/en-US/docs/Web/API/MutationObserver)
+/// or a selection change happens within the view. When the change is
+/// a selection change, the record will have a `type` property of
+/// `"selection"` (which doesn't occur for native mutation records).
+export type ViewMutationRecord = MutationRecord | { type: "selection", target: DOMNode }
+
 /// By default, document nodes are rendered using the result of the
 /// [`toDOM`](#model.NodeSpec.toDOM) method of their spec, and managed
 /// entirely by the editor. For some use cases, such as embedded
 /// node-specific editing interfaces, you want more control over
 /// the behavior of a node's in-editor representation, and need to
 /// [define](#view.EditorProps.nodeViews) a custom node view.
-///
-/// Mark views only support `dom` and `contentDOM`, and don't support
-/// any of the node view methods.
 ///
 /// Objects returned as node views must conform to this interface.
 export interface NodeView {
@@ -33,17 +37,25 @@ export interface NodeView {
   /// (or deciding not to render) its child nodes.
   contentDOM?: HTMLElement | null
 
-  /// When given, this will be called when the view is updating itself.
-  /// It will be given a node (possibly of a different type), an array
-  /// of active decorations around the node (which are automatically
-  /// drawn, and the node view may ignore if it isn't interested in
-  /// them), and a [decoration source](#view.DecorationSource) that
-  /// represents any decorations that apply to the content of the node
-  /// (which again may be ignored). It should return true if it was
-  /// able to update to that node, and false otherwise. If the node
-  /// view has a `contentDOM` property (or no `dom` property), updating
-  /// its child nodes will be handled by ProseMirror.
+  /// When given, this will be called when the view is updating
+  /// itself. It will be given a node, an array of active decorations
+  /// around the node (which are automatically drawn, and the node
+  /// view may ignore if it isn't interested in them), and a
+  /// [decoration source](#view.DecorationSource) that represents any
+  /// decorations that apply to the content of the node (which again
+  /// may be ignored). It should return true if it was able to update
+  /// to that node, and false otherwise. If the node view has a
+  /// `contentDOM` property (or no `dom` property), updating its child
+  /// nodes will be handled by ProseMirror.
   update?: (node: Node, decorations: readonly Decoration[], innerDecorations: DecorationSource) => boolean
+
+  /// By default, `update` will only be called when a node of the same
+  /// node type appears in this view's position. When you set this to
+  /// true, it will be called for any node, making it possible to have
+  /// a node view that representsmultiple types of nodes. You will
+  /// need to check the type of the nodes you get in `update` and
+  /// return `false` for types you cannot handle.
+  multiType?: boolean
 
   /// Can be used to override the way the node's selected status (as a
   /// node selection) is displayed.
@@ -65,18 +77,39 @@ export interface NodeView {
   /// which this returns true are not handled by the editor.
   stopEvent?: (event: Event) => boolean
 
-  /// Called when a DOM
-  /// [mutation](https://developer.mozilla.org/en-US/docs/Web/API/MutationObserver)
-  /// or a selection change happens within the view. When the change is
-  /// a selection change, the record will have a `type` property of
-  /// `"selection"` (which doesn't occur for native mutation records).
-  /// Return false if the editor should re-read the selection or
-  /// re-parse the range around the mutation, true if it can safely be
-  /// ignored.
-  ignoreMutation?: (mutation: MutationRecord) => boolean
+  /// Called when a [mutation](#view.ViewMutationRecord) happens within the
+  /// view. Return false if the editor should re-read the selection or re-parse
+  /// the range around the mutation, true if it can safely be ignored.
+  ignoreMutation?: (mutation: ViewMutationRecord) => boolean
 
   /// Called when the node view is removed from the editor or the whole
-  /// editor is destroyed. (Not available for marks.)
+  /// editor is destroyed.
+  destroy?: () => void
+}
+
+/// By default, document marks are rendered using the result of the
+/// [`toDOM`](#model.MarkSpec.toDOM) method of their spec, and managed entirely
+/// by the editor. For some use cases, you want more control over the behavior
+/// of a mark's in-editor representation, and need to
+/// [define](#view.EditorProps.markViews) a custom mark view.
+///
+/// Objects returned as mark views must conform to this interface.
+export interface MarkView {
+  /// The outer DOM node that represents the document node.
+  dom: DOMNode
+
+  /// The DOM node that should hold the mark's content. When this is not
+  /// present, the `dom` property is used as the content DOM.
+  contentDOM?: HTMLElement | null
+
+  /// Called when a [mutation](#view.ViewMutationRecord) happens within the
+  /// view. Return false if the editor should re-read the selection or re-parse
+  /// the range around the mutation, true if it can safely be ignored.
+  ignoreMutation?: (mutation: ViewMutationRecord) => boolean
+
+  
+  /// Called when the mark view is removed from the editor or the whole
+  /// editor is destroyed.
   destroy?: () => void
 }
 
@@ -256,7 +289,12 @@ export class ViewDesc {
     for (let i = 0, offset = 0; i < this.children.length; i++) {
       let child = this.children[i], end = offset + child.size
       if (offset == pos && end != offset) {
-        while (!child.border && child.children.length) child = child.children[0]
+        while (!child.border && child.children.length) {
+          for (let i = 0; i < child.children.length; i++) {
+            let inner = child.children[i]
+            if (inner.size) { child = inner; break }
+          }
+        }
         return child
       }
       if (pos < end) return child.descAt(pos - offset - child.border)
@@ -362,19 +400,20 @@ export class ViewDesc {
   // custom things with the selection. Note that this falls apart when
   // a selection starts in such a node and ends in another, in which
   // case we just use whatever domFromPos produces as a best effort.
-  setSelection(anchor: number, head: number, root: Document | ShadowRoot, force = false): void {
+  setSelection(anchor: number, head: number, view: EditorView, force = false): void {
     // If the selection falls entirely in a child, give it to that child
     let from = Math.min(anchor, head), to = Math.max(anchor, head)
     for (let i = 0, offset = 0; i < this.children.length; i++) {
       let child = this.children[i], end = offset + child.size
       if (from > offset && to < end)
-        return child.setSelection(anchor - offset - child.border, head - offset - child.border, root, force)
+        return child.setSelection(anchor - offset - child.border, head - offset - child.border, view, force)
       offset = end
     }
 
     let anchorDOM = this.domFromPos(anchor, anchor ? -1 : 1)
     let headDOM = head == anchor ? anchorDOM : this.domFromPos(head, head ? -1 : 1)
-    let domSel = (root as Document).getSelection()!
+    let domSel = (view.root as Document).getSelection()!
+    let selRange = view.domSelectionRange()
 
     let brKludge = false
     // On Firefox, using Selection.collapse to put the cursor after a
@@ -404,14 +443,14 @@ export class ViewDesc {
     }
     // Firefox can act strangely when the selection is in front of an
     // uneditable node. See #1163 and https://bugzilla.mozilla.org/show_bug.cgi?id=1709536
-    if (browser.gecko && domSel.focusNode && domSel.focusNode != headDOM.node && domSel.focusNode.nodeType == 1) {
-      let after = domSel.focusNode.childNodes[domSel.focusOffset]
+    if (browser.gecko && selRange.focusNode && selRange.focusNode != headDOM.node && selRange.focusNode.nodeType == 1) {
+      let after = selRange.focusNode.childNodes[selRange.focusOffset]
       if (after && (after as HTMLElement).contentEditable == "false") force = true
     }
 
     if (!(force || brKludge && browser.safari) &&
-        isEquivalentPosition(anchorDOM.node, anchorDOM.offset, domSel.anchorNode!, domSel.anchorOffset) &&
-        isEquivalentPosition(headDOM.node, headDOM.offset, domSel.focusNode!, domSel.focusOffset))
+        isEquivalentPosition(anchorDOM.node, anchorDOM.offset, selRange.anchorNode!, selRange.anchorOffset) &&
+        isEquivalentPosition(headDOM.node, headDOM.offset, selRange.focusNode!, selRange.focusOffset))
       return
 
     // Selection.extend can be used to create an 'inverted' selection
@@ -443,8 +482,8 @@ export class ViewDesc {
     }
   }
 
-  ignoreMutation(mutation: MutationRecord): boolean {
-    return !this.contentDOM && (mutation.type as any) != "selection"
+  ignoreMutation(mutation: ViewMutationRecord): boolean {
+    return !this.contentDOM && mutation.type != "selection"
   }
 
   get contentLost() {
@@ -523,8 +562,8 @@ class WidgetViewDesc extends ViewDesc {
     return stop ? stop(event) : false
   }
 
-  ignoreMutation(mutation: MutationRecord) {
-    return (mutation.type as any) != "selection" || this.widget.spec.ignoreSelection
+  ignoreMutation(mutation: ViewMutationRecord) {
+    return mutation.type != "selection" || this.widget.spec.ignoreSelection
   }
 
   destroy() {
@@ -553,7 +592,7 @@ class CompositionViewDesc extends ViewDesc {
     return {node: this.textDOM, offset: pos}
   }
 
-  ignoreMutation(mut: MutationRecord) {
+  ignoreMutation(mut: ViewMutationRecord) {
     return mut.type === 'characterData' && mut.target.nodeValue == mut.oldValue
    }
 }
@@ -564,7 +603,7 @@ class CompositionViewDesc extends ViewDesc {
 // some cases they will be split more often than would appear
 // necessary.
 class MarkViewDesc extends ViewDesc {
-  constructor(parent: ViewDesc, readonly mark: Mark, dom: DOMNode, contentDOM: HTMLElement) {
+  constructor(parent: ViewDesc, readonly mark: Mark, dom: DOMNode, contentDOM: HTMLElement, readonly spec: MarkView) {
     super(parent, [], dom, contentDOM)
   }
 
@@ -572,8 +611,8 @@ class MarkViewDesc extends ViewDesc {
     let custom = view.nodeViews[mark.type.name]
     let spec: {dom: HTMLElement, contentDOM?: HTMLElement} = custom && (custom as any)(mark, view, inline)
     if (!spec || !spec.dom)
-      spec = DOMSerializer.renderSpec(document, mark.type.spec.toDOM!(mark, inline)) as any
-    return new MarkViewDesc(parent, mark, spec.dom, spec.contentDOM || spec.dom as HTMLElement)
+      spec = (DOMSerializer.renderSpec as any)(document, mark.type.spec.toDOM!(mark, inline), null, mark.attrs) as any
+    return new MarkViewDesc(parent, mark, spec.dom, spec.contentDOM || spec.dom as HTMLElement, spec)
   }
 
   parseRule() {
@@ -602,6 +641,15 @@ class MarkViewDesc extends ViewDesc {
     for (let i = 0; i < nodes.length; i++) nodes[i].parent = copy
     copy.children = nodes
     return copy
+  }
+
+  ignoreMutation(mutation: ViewMutationRecord) {
+    return this.spec.ignoreMutation ? this.spec.ignoreMutation(mutation) : super.ignoreMutation(mutation)
+  }
+
+  destroy() {
+    if (this.spec.destroy) this.spec.destroy()
+    super.destroy()
   }
 }
 
@@ -647,7 +695,8 @@ export class NodeViewDesc extends ViewDesc {
       if (!dom) dom = document.createTextNode(node.text!)
       else if (dom.nodeType != 3) throw new RangeError("Text must be rendered as a DOM text node")
     } else if (!dom) {
-      ;({dom, contentDOM} = DOMSerializer.renderSpec(document, node.type.spec.toDOM!(node)))
+      let spec = (DOMSerializer.renderSpec as any)(document, node.type.spec.toDOM!(node), null, node.attrs)
+      ;({dom, contentDOM} = spec as {dom: DOMNode, contentDOM?: HTMLElement})
     }
     if (!contentDOM && !node.isText && dom.nodeName != "BR") { // Chrome gets confused by <br contenteditable=false>
       if (!(dom as HTMLElement).hasAttribute("contenteditable")) (dom as HTMLElement).contentEditable = "false"
@@ -893,8 +942,8 @@ class TextViewDesc extends NodeViewDesc {
     return super.localPosFromDOM(dom, offset, bias)
   }
 
-  ignoreMutation(mutation: MutationRecord) {
-    return mutation.type != "characterData" && (mutation.type as any) != "selection"
+  ignoreMutation(mutation: ViewMutationRecord) {
+    return mutation.type != "characterData" && mutation.type != "selection"
   }
 
   slice(from: number, to: number, view: EditorView) {
@@ -937,7 +986,7 @@ class CustomNodeViewDesc extends NodeViewDesc {
   // updates the children.
   update(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView) {
     if (this.dirty == NODE_DIRTY) return false
-    if (this.spec.update) {
+    if (this.spec.update && (this.node.type == node.type || this.spec.multiType)) {
       let result = this.spec.update(node, outerDeco, innerDeco)
       if (result) this.updateInner(node, outerDeco, innerDeco, view)
       return result
@@ -956,9 +1005,9 @@ class CustomNodeViewDesc extends NodeViewDesc {
     this.spec.deselectNode ? this.spec.deselectNode() : super.deselectNode()
   }
 
-  setSelection(anchor: number, head: number, root: Document | ShadowRoot, force: boolean) {
-    this.spec.setSelection ? this.spec.setSelection(anchor, head, root)
-      : super.setSelection(anchor, head, root, force)
+  setSelection(anchor: number, head: number, view: EditorView, force: boolean) {
+    this.spec.setSelection ? this.spec.setSelection(anchor, head, view.root)
+      : super.setSelection(anchor, head, view, force)
   }
 
   destroy() {
@@ -970,7 +1019,7 @@ class CustomNodeViewDesc extends NodeViewDesc {
     return this.spec.stopEvent ? this.spec.stopEvent(event) : false
   }
 
-  ignoreMutation(mutation: MutationRecord) {
+  ignoreMutation(mutation: ViewMutationRecord) {
     return this.spec.ignoreMutation ? this.spec.ignoreMutation(mutation) : super.ignoreMutation(mutation)
   }
 }
@@ -1248,6 +1297,7 @@ class ViewTreeUpdater {
           this.index++
           return true
         } else if (!locked && (updated = this.recreateWrapper(next, node, outerDeco, innerDeco, view, pos))) {
+          this.destroyBetween(this.index, i)
           this.top.children[this.index] = updated
           if (updated.contentDOM) {
             updated.dirty = CONTENT_DIRTY
@@ -1269,7 +1319,8 @@ class ViewTreeUpdater {
   recreateWrapper(next: NodeViewDesc, node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource,
                   view: EditorView, pos: number) {
     if (next.dirty || node.isAtom || !next.children.length ||
-        !next.node.content.eq(node.content)) return null
+        !next.node.content.eq(node.content) ||
+        !sameOuterDeco(outerDeco, next.outerDeco) || !innerDeco.eq(next.innerDeco)) return null
     let wrapper = NodeViewDesc.create(this.top, node, outerDeco, innerDeco, view, pos)
     if (wrapper.contentDOM) {
       wrapper.children = next.children

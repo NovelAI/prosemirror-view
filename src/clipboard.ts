@@ -213,6 +213,18 @@ function detachedDoc() {
   return _detachedDoc || (_detachedDoc = document.implementation.createHTMLDocument("title"))
 }
 
+let _policy: any = null
+
+function maybeWrapTrusted(html: string): string {
+  let trustedTypes = (window as any).trustedTypes
+  if (!trustedTypes) return html
+  // With the require-trusted-types-for CSP, Chrome will block
+  // innerHTML, even on a detached document. This wraps the string in
+  // a way that makes the browser allow us to use its parser again.
+  if (!_policy) _policy = trustedTypes.createPolicy("ProseMirrorClipboard", {createHTML: (s: string) => s})
+  return _policy.createHTML(html)
+}
+
 function readHTML(html: string) {
   let metas = /^(\s*<meta [^>]*>)*/.exec(html)
   if (metas) html = html.slice(metas[0].length)
@@ -220,7 +232,7 @@ function readHTML(html: string) {
   let firstTag = /<([a-z][^>\s]+)/i.exec(html), wrap
   if (wrap = firstTag && wrapMap[firstTag[1].toLowerCase()])
     html = wrap.map(n => "<" + n + ">").join("") + html + wrap.map(n => "</" + n + ">").reverse().join("")
-  elt.innerHTML = html
+  elt.innerHTML = maybeWrapTrusted(html)
   if (wrap) for (let i = 0; i < wrap.length; i++) elt = elt.querySelector(wrap[i]) || elt
   return elt
 }

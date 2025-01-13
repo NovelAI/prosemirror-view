@@ -242,10 +242,11 @@ function posFromCaret(view: EditorView, node: Node, offset: number, coords: {top
   let outsideBlock = -1
   for (let cur = node, sawBlock = false;;) {
     if (cur == view.dom) break
-    let desc = view.docView.nearestDesc(cur, true)
+    let desc = view.docView.nearestDesc(cur, true), rect
     if (!desc) return null
-    if (desc.dom.nodeType == 1 && (desc.node.isBlock && desc.parent || !desc.contentDOM)) {
-      let rect = (desc.dom as HTMLElement).getBoundingClientRect()
+    if (desc.dom.nodeType == 1 && (desc.node.isBlock && desc.parent || !desc.contentDOM) &&
+        // Ignore elements with zero-size bounding rectangles
+        ((rect = (desc.dom as HTMLElement).getBoundingClientRect()).width || rect.height)) {
       if (desc.node.isBlock && desc.parent) {
         // Only apply the horizontal test to the innermost block. Vertical for any parent.
         if (!sawBlock && rect.left > coords.left || rect.top > coords.top) outsideBlock = desc.posBefore
@@ -482,7 +483,8 @@ function endOfTextblockHorizontal(view: EditorView, state: EditorState, dir: "le
   let {$head} = state.selection
   if (!$head.parent.isTextblock) return false
   let offset = $head.parentOffset, atStart = !offset, atEnd = offset == $head.parent.content.size
-  let sel = view.domSelection()
+  let sel: Selection = view.domSelection()!
+  if (!sel) return $head.pos == $head.start() || $head.pos == $head.end()
   // If the textblock is all LTR, or the browser doesn't support
   // Selection.modify (Edge), fall back to a primitive approach
   if (!maybeRTL.test($head.parent.textContent) || !(sel as any).modify)

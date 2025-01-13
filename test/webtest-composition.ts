@@ -2,7 +2,7 @@ import {schema, eq, doc, p, em, code, strong} from "prosemirror-test-builder"
 import ist from "ist"
 import {Decoration, DecorationSet, __endComposition, EditorView} from "prosemirror-view"
 import {EditorState, Plugin} from "prosemirror-state"
-import {tempEditor, requireFocus, findTextNode} from "./view"
+import {tempEditor, requireFocus, findTextNode, flush} from "./view"
 
 function event(pm: EditorView, type: string) {
   pm.dom.dispatchEvent(new CompositionEvent(type))
@@ -29,7 +29,7 @@ function compose(pm: EditorView, start: () => Text, update: ((node: Text) => voi
     if (i < 0) node = start()
     else update[i](node!)
     let {focusNode, focusOffset} = sel
-    pm.domObserver.flush()
+    flush(pm)
 
     if (options.cancel && i == update.length - 1) {
       ist(!hasCompositionNode(pm))
@@ -43,7 +43,7 @@ function compose(pm: EditorView, start: () => Text, update: ((node: Text) => voi
   event(pm, "compositionend")
   if (options.end) {
     options.end(node!)
-    pm.domObserver.flush()
+    flush(pm)
   }
   __endComposition(pm)
   ist(!pm.composing)
@@ -274,7 +274,7 @@ describe("EditorView composition", () => {
     event(pm, "compositionstart")
     let one = findTextNode(pm.dom, "one")!
     edit(one, "!")
-    pm.domObserver.flush()
+    flush(pm)
     event(pm, "compositionend")
     one.nodeValue = "one!!"
     let L2 = pm.dom.lastChild
@@ -282,31 +282,26 @@ describe("EditorView composition", () => {
     let two = findTextNode(pm.dom, "two")!
     ist(pm.dom.lastChild, L2)
     edit(two, ".")
-    pm.domObserver.flush()
+    flush(pm)
     ist(document.getSelection()!.focusNode, two)
     ist(document.getSelection()!.focusOffset, 4)
     ist(pm.composing)
     event(pm, "compositionend")
-    pm.domObserver.flush()
+    flush(pm)
     ist(pm.state.doc, doc(p("one!!"), p("two.")), eq)
   })
 
-  function crossParagraph(first = false) {
+  it("can handle cross-paragraph compositions", () => {
     let pm = requireFocus(tempEditor({doc: doc(p("one <a>two"), p("three"), p("four<b> five"))}))
     compose(pm, () => {
-      for (let i = 0; i < 2; i++) pm.dom.removeChild(first ? pm.dom.lastChild! : pm.dom.firstChild!)
       let target = pm.dom.firstChild!.firstChild as Text
       target.nodeValue = "one A five"
-      document.getSelection()!.collapse(target, 4)
+      document.getSelection()!.collapse(target, 5)
       return target
     }, [
       n => edit(n, "B", 4, 5),
       n => edit(n, "C", 4, 5)
     ])
     ist(pm.state.doc, doc(p("one C five")), eq)
-  }
-
-  it("can handle cross-paragraph compositions", () => crossParagraph(true))
-
-  it("can handle cross-paragraph compositions (keeping the last paragraph)", () => crossParagraph(false))
+  })
 })
