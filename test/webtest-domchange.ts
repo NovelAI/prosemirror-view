@@ -2,7 +2,7 @@ import ist from "ist"
 import {eq, doc, p, pre, h1, a, em, img as img_, br, strong, blockquote} from "prosemirror-test-builder"
 import {EditorState, TextSelection} from "prosemirror-state"
 import {Step} from "prosemirror-transform"
-import {tempEditor, findTextNode, flush} from "./view"
+import {tempEditor, findTextNode, flush} from "./view.js"
 
 const img = img_({src: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="})
 
@@ -91,6 +91,18 @@ describe("DOM change", () => {
     })
     let bq = view.dom.querySelector("blockquote")!
     bq.appendChild(document.createElement("p"))
+    flush(view)
+    ist(enterPressed)
+  })
+
+  it("detects an enter press creating a different block", () => {
+    let enterPressed = false
+    let view = tempEditor({
+      doc: doc(h1("<a>")),
+      handleKeyDown: (_view, event) => { if (event.keyCode == 13) return enterPressed = true }
+    })
+    let h2 = view.dom.appendChild(document.createElement("h2"))
+    setSel(h2, 0)
     flush(view)
     ist(enterPressed)
   })
