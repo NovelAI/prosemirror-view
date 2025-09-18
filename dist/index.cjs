@@ -51,6 +51,7 @@ var isEquivalentPosition = function isEquivalentPosition(node, off, targetNode, 
 };
 var atomElements = /^(img|br|input|textarea|hr)$/i;
 function scanFor(node, off, targetNode, targetOff, dir) {
+  var _a;
   for (;;) {
     if (node == targetNode && off == targetOff) return true;
     if (off == (dir < 0 ? 0 : nodeSize(node))) {
@@ -59,9 +60,13 @@ function scanFor(node, off, targetNode, targetOff, dir) {
       off = domIndex(node) + (dir < 0 ? 0 : 1);
       node = parent;
     } else if (node.nodeType == 1) {
-      node = node.childNodes[off + (dir < 0 ? -1 : 0)];
-      if (node.contentEditable == "false") return false;
-      off = dir < 0 ? nodeSize(node) : 0;
+      var child = node.childNodes[off + (dir < 0 ? -1 : 0)];
+      if (child.nodeType == 1 && child.contentEditable == "false") {
+        if ((_a = child.pmViewDesc) === null || _a === undefined ? undefined : _a.ignoreForSelection) off += dir;else return false;
+      } else {
+        node = child;
+        off = dir < 0 ? nodeSize(node) : 0;
+      }
     } else {
       return false;
     }
@@ -201,9 +206,12 @@ function scrollRectIntoView(view, rect, startDOM) {
   var scrollThreshold = view.someProp("scrollThreshold") || 0,
     scrollMargin = view.someProp("scrollMargin") || 5;
   var doc = view.dom.ownerDocument;
-  for (var parent = startDOM || view.dom;; parent = parentNode(parent)) {
+  for (var parent = startDOM || view.dom;;) {
     if (!parent) break;
-    if (parent.nodeType != 1) continue;
+    if (parent.nodeType != 1) {
+      parent = parentNode(parent);
+      continue;
+    }
     var elt = parent;
     var atTop = elt == doc.body;
     var bounding = atTop ? windowRect(doc) : clientRect(elt);
@@ -229,7 +237,9 @@ function scrollRectIntoView(view, rect, startDOM) {
         };
       }
     }
-    if (atTop || /^(fixed|sticky)$/.test(getComputedStyle(parent).position)) break;
+    var pos = atTop ? "fixed" : getComputedStyle(parent).position;
+    if (/^(fixed|sticky)$/.test(pos)) break;
+    parent = pos == "absolute" ? parent.offsetParent : parentNode(parent);
   }
 }
 function storeScrollPos(view) {
@@ -410,7 +420,7 @@ function posFromCaret(view, node, offset, coords) {
       rect = void 0;
     if (!desc) return null;
     if (desc.dom.nodeType == 1 && (desc.node.isBlock && desc.parent || !desc.contentDOM) && ((rect = desc.dom.getBoundingClientRect()).width || rect.height)) {
-      if (desc.node.isBlock && desc.parent) {
+      if (desc.node.isBlock && desc.parent && !/^T(R|BODY|HEAD|FOOT)$/.test(desc.dom.nodeName)) {
         if (!sawBlock && rect.left > coords.left || rect.top > coords.top) outsideBlock = desc.posBefore;else if (!sawBlock && rect.right < coords.left || rect.bottom < coords.top) outsideBlock = desc.posAfter;
         sawBlock = true;
       }
@@ -1005,7 +1015,7 @@ var ViewDesc = function () {
       }
       if (!(force || brKludge && safari) && isEquivalentPosition(anchorDOM.node, anchorDOM.offset, selRange.anchorNode, selRange.anchorOffset) && isEquivalentPosition(headDOM.node, headDOM.offset, selRange.focusNode, selRange.focusOffset)) return;
       var domSelExtended = false;
-      if ((domSel.extend || anchor == head) && !brKludge) {
+      if ((domSel.extend || anchor == head) && !(brKludge && gecko)) {
         domSel.collapse(anchorDOM.node, anchorDOM.offset);
         try {
           if (anchor != head) domSel.extend(headDOM.node, headDOM.offset);
@@ -1076,6 +1086,11 @@ var ViewDesc = function () {
       return false;
     }
   }, {
+    key: "ignoreForSelection",
+    get: function get() {
+      return false;
+    }
+  }, {
     key: "isText",
     value: function isText(text) {
       return false;
@@ -1141,6 +1156,11 @@ var WidgetViewDesc = function (_ViewDesc) {
     key: "domAtom",
     get: function get() {
       return true;
+    }
+  }, {
+    key: "ignoreForSelection",
+    get: function get() {
+      return !!this.widget.type.spec.relaxedSide;
     }
   }, {
     key: "side",
@@ -2252,15 +2272,11 @@ function removeClassOnSelectionChange(view) {
   });
 }
 function selectCursorWrapper(view) {
-  var domSel = view.domSelection(),
-    range = document.createRange();
+  var domSel = view.domSelection();
   if (!domSel) return;
   var node = view.cursorWrapper.dom,
     img = node.nodeName == "IMG";
-  if (img) range.setStart(node.parentNode, domIndex(node) + 1);else range.setStart(node, 0);
-  range.collapse(true);
-  domSel.removeAllRanges();
-  domSel.addRange(range);
+  if (img) domSel.collapse(node.parentNode, domIndex(node) + 1);else domSel.collapse(node, 0);
   if (!img && !view.state.selection.visible && ie && ie_version <= 11) {
     node.disabled = true;
     node.disabled = false;
@@ -2610,7 +2626,7 @@ function captureKeyDown(view, event) {
   }
   return false;
 }
-function serializeForClipboard(view, slice) {
+function _serializeForClipboard(view, slice) {
   view.someProp("transformCopied", function (f) {
     slice = f(slice, view);
   });
@@ -2666,12 +2682,18 @@ function parseFromClipboard(view, text, html, plainText, $context) {
   var inCode = $context.parent.type.spec.code;
   var dom, slice;
   if (!html && !text) return null;
-  var asText = text && (plainText || inCode || !html);
+  var asText = !!text && (plainText || inCode || !html);
   if (asText) {
     view.someProp("transformPastedText", function (f) {
       text = f(text, inCode || plainText, view);
     });
-    if (inCode) return text ? new prosemirrorModel.Slice(prosemirrorModel.Fragment.from(view.state.schema.text(text.replace(/\r\n?/g, "\n"))), 0, 0) : prosemirrorModel.Slice.empty;
+    if (inCode) {
+      slice = new prosemirrorModel.Slice(prosemirrorModel.Fragment.from(view.state.schema.text(text.replace(/\r\n?/g, "\n"))), 0, 0);
+      view.someProp("transformPasted", function (f) {
+        slice = f(slice, view, true);
+      });
+      return slice;
+    }
     var parsed = view.someProp("clipboardTextParser", function (f) {
       return f(text, $context, plainText, view);
     });
@@ -2728,7 +2750,7 @@ function parseFromClipboard(view, text, html, plainText, $context) {
     }
   }
   view.someProp("transformPasted", function (f) {
-    slice = f(slice, view);
+    slice = f(slice, view, asText);
   });
   return slice;
 }
@@ -2817,7 +2839,7 @@ var _policy = null;
 function maybeWrapTrusted(html) {
   var trustedTypes = window.trustedTypes;
   if (!trustedTypes) return html;
-  if (!_policy) _policy = trustedTypes.createPolicy("ProseMirrorClipboard", {
+  if (!_policy) _policy = trustedTypes.defaultPolicy || trustedTypes.createPolicy("ProseMirrorClipboard", {
     createHTML: function createHTML(s) {
       return s;
     }
@@ -2883,7 +2905,8 @@ var InputState = _createClass(function InputState() {
     time: 0,
     x: 0,
     y: 0,
-    type: ""
+    type: "",
+    button: 0
   };
   this.lastSelectionOrigin = null;
   this.lastSelectionTime = 0;
@@ -2994,9 +3017,12 @@ editHandlers.keypress = function (view, _event) {
   var sel = view.state.selection;
   if (!(sel instanceof prosemirrorState.TextSelection) || !sel.$from.sameParent(sel.$to)) {
     var text = String.fromCharCode(event.charCode);
+    var deflt = function deflt() {
+      return view.state.tr.insertText(text).scrollIntoView();
+    };
     if (!/[\r\n]/.test(text) && !view.someProp("handleTextInput", function (f) {
-      return f(view, sel.$from.pos, sel.$to.pos, text);
-    })) view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+      return f(view, sel.$from.pos, sel.$to.pos, text, deflt);
+    })) view.dispatch(deflt());
     event.preventDefault();
   }
 };
@@ -3109,14 +3135,15 @@ handlers.mousedown = function (view, _event) {
   var flushed = forceDOMFlush(view);
   var now = Date.now(),
     type = "singleClick";
-  if (now - view.input.lastClick.time < 500 && isNear(event, view.input.lastClick) && !event[selectNodeModifier]) {
+  if (now - view.input.lastClick.time < 500 && isNear(event, view.input.lastClick) && !event[selectNodeModifier] && view.input.lastClick.button == event.button) {
     if (view.input.lastClick.type == "singleClick") type = "doubleClick";else if (view.input.lastClick.type == "doubleClick") type = "tripleClick";
   }
   view.input.lastClick = {
     time: now,
     x: event.clientX,
     y: event.clientY,
-    type: type
+    type: type,
+    button: event.button
   };
   var pos = view.posAtCoords(eventCoords(event));
   if (!pos) return;
@@ -3332,8 +3359,9 @@ function endComposition(view) {
   view.domObserver.forceFlush();
   clearComposition(view);
   if (restarting || view.docView && view.docView.dirty) {
-    var sel = selectionFromDOM(view);
-    if (sel && !sel.eq(view.state.selection)) view.dispatch(view.state.tr.setSelection(sel));else if ((view.markCursor || restarting) && !view.state.selection.empty) view.dispatch(view.state.tr.deleteSelection());else view.updateState(view.state);
+    var sel = selectionFromDOM(view),
+      cur = view.state.selection;
+    if (sel && !sel.eq(cur)) view.dispatch(view.state.tr.setSelection(sel));else if ((view.markCursor || restarting) && !cur.$from.node(cur.$from.sharedDepth(cur.to)).inlineContent) view.dispatch(view.state.tr.deleteSelection());else view.updateState(view.state);
     return true;
   }
   return false;
@@ -3362,7 +3390,7 @@ handlers.copy = editHandlers.cut = function (view, _event) {
   if (sel.empty) return;
   var data = brokenClipboardAPI ? null : event.clipboardData;
   var slice = sel.content(),
-    _serializeForClipboar = serializeForClipboard(view, slice),
+    _serializeForClipboar = _serializeForClipboard(view, slice),
     dom = _serializeForClipboar.dom,
     text = _serializeForClipboar.text;
   if (data) {
@@ -3423,6 +3451,12 @@ var Dragging = _createClass(function Dragging(slice, move, node) {
   this.node = node;
 });
 var dragCopyModifier = mac ? "altKey" : "ctrlKey";
+function dragMoves(view, event) {
+  var moves = view.someProp("dragCopies", function (test) {
+    return !test(event);
+  });
+  return moves != null ? moves : !event[dragCopyModifier];
+}
 handlers.dragstart = function (view, _event) {
   var event = _event;
   var mouseDown = view.input.mouseDown;
@@ -3438,7 +3472,7 @@ handlers.dragstart = function (view, _event) {
     if (desc && desc.node.type.spec.draggable && desc != view.docView) node = prosemirrorState.NodeSelection.create(view.state.doc, desc.posBefore);
   }
   var draggedSlice = (node || view.state.selection).content();
-  var _serializeForClipboar2 = serializeForClipboard(view, draggedSlice),
+  var _serializeForClipboar2 = _serializeForClipboard(view, draggedSlice),
     dom = _serializeForClipboar2.dom,
     text = _serializeForClipboar2.text,
     slice = _serializeForClipboar2.slice;
@@ -3446,7 +3480,7 @@ handlers.dragstart = function (view, _event) {
   event.dataTransfer.setData(brokenClipboardAPI ? "Text" : "text/html", dom.innerHTML);
   event.dataTransfer.effectAllowed = "copyMove";
   if (!brokenClipboardAPI) event.dataTransfer.setData("text/plain", text);
-  view.dragging = new Dragging(slice, !event[dragCopyModifier], node);
+  view.dragging = new Dragging(slice, dragMoves(view, event), node);
 };
 handlers.dragend = function (view) {
   var dragging = view.dragging;
@@ -3468,12 +3502,12 @@ editHandlers.drop = function (view, _event) {
   var slice = dragging && dragging.slice;
   if (slice) {
     view.someProp("transformPasted", function (f) {
-      slice = f(slice, view);
+      slice = f(slice, view, false);
     });
   } else {
     slice = parseFromClipboard(view, getText(event.dataTransfer), brokenClipboardAPI ? null : event.dataTransfer.getData("text/html"), false, $mouse);
   }
-  var move = !!(dragging && !event[dragCopyModifier]);
+  var move = !!(dragging && dragMoves(view, event));
   if (view.someProp("handleDrop", function (f) {
     return f(view, event, slice || prosemirrorModel.Slice.empty, move);
   })) {
@@ -4573,7 +4607,7 @@ function ruleFromNode(dom) {
   }
   return null;
 }
-var isInline = /^(a|abbr|acronym|b|bd[io]|big|br|button|cite|code|data(list)?|del|dfn|em|i|ins|kbd|label|map|mark|meter|output|q|ruby|s|samp|small|span|strong|su[bp]|time|u|tt|var)$/i;
+var isInline = /^(a|abbr|acronym|b|bd[io]|big|br|button|cite|code|data(list)?|del|dfn|em|i|img|ins|kbd|label|map|mark|meter|output|q|ruby|s|samp|small|span|strong|su[bp]|time|u|tt|var)$/i;
 function readDOMChange(view, from, to, typeOver, addedNodes) {
   var compositionID = view.input.compositionPendingChanges || (view.composing ? view.input.compositionID : 0);
   view.input.compositionPendingChanges = 0;
@@ -4584,10 +4618,10 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
       if (chrome && android && view.input.lastKeyCode === 13 && Date.now() - 100 < view.input.lastKeyCodeTime && view.someProp("handleKeyDown", function (f) {
         return f(view, keyEvent(13, "Enter"));
       })) return;
-      var _tr = view.state.tr.setSelection(newSel);
-      if (origin == "pointer") _tr.setMeta("pointer", true);else if (origin == "key") _tr.scrollIntoView();
-      if (compositionID) _tr.setMeta("composition", compositionID);
-      view.dispatch(_tr);
+      var tr = view.state.tr.setSelection(newSel);
+      if (origin == "pointer") tr.setMeta("pointer", true);else if (origin == "key") tr.scrollIntoView();
+      if (compositionID) tr.setMeta("composition", compositionID);
+      view.dispatch(tr);
     }
     return;
   }
@@ -4629,9 +4663,9 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
       if (parse.sel) {
         var _sel2 = resolveSelection(view, view.state.doc, parse.sel);
         if (_sel2 && !_sel2.eq(view.state.selection)) {
-          var _tr2 = view.state.tr.setSelection(_sel2);
-          if (compositionID) _tr2.setMeta("composition", compositionID);
-          view.dispatch(_tr2);
+          var _tr = view.state.tr.setSelection(_sel2);
+          if (compositionID) _tr.setMeta("composition", compositionID);
+          view.dispatch(_tr);
         }
       }
       return;
@@ -4657,7 +4691,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
   var nextSel;
   if ((ios && view.input.lastIOSEnter > Date.now() - 225 && (!inlineChange || addedNodes.some(function (n) {
     return n.nodeName == "DIV" || n.nodeName == "P";
-  })) || !inlineChange && $from.pos < parse.doc.content.size && !$from.sameParent($to) && (nextSel = prosemirrorState.Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) && nextSel.head == $to.pos) && view.someProp("handleKeyDown", function (f) {
+  })) || !inlineChange && $from.pos < parse.doc.content.size && (!$from.sameParent($to) || !$from.parent.inlineContent) && !/\S/.test(parse.doc.textBetween($from.pos, $to.pos, "", "")) && (nextSel = prosemirrorState.Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) && nextSel.head > $from.pos) && view.someProp("handleKeyDown", function (f) {
     return f(view, keyEvent(13, "Enter"));
   })) {
     view.input.lastIOSEnter = 0;
@@ -4681,7 +4715,16 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
   }
   var chFrom = change.start,
     chTo = change.endA;
-  var tr, storedMarks, markChange;
+  var mkTr = function mkTr(base) {
+    var tr = base || view.state.tr.replace(chFrom, chTo, parse.doc.slice(change.start - parse.from, change.endB - parse.from));
+    if (parse.sel) {
+      var _sel3 = resolveSelection(view, tr.doc, parse.sel);
+      if (_sel3 && !(chrome && view.composing && _sel3.empty && (change.start != change.endB || view.input.lastChromeDelete < Date.now() - 100) && (_sel3.head == chFrom || _sel3.head == tr.mapping.map(chTo) - 1) || ie && _sel3.empty && _sel3.head == chFrom)) tr.setSelection(_sel3);
+    }
+    if (compositionID) tr.setMeta("composition", compositionID);
+    return tr.scrollIntoView();
+  };
+  var markChange;
   if (inlineChange) {
     if ($from.pos == $to.pos) {
       if (ie && ie_version <= 11 && $from.parentOffset == 0) {
@@ -4690,27 +4733,26 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
           return selectionToDOM(view);
         }, 20);
       }
-      tr = view.state.tr["delete"](chFrom, chTo);
-      storedMarks = doc.resolve(change.start).marksAcross(doc.resolve(change.endA));
+      var _tr2 = mkTr(view.state.tr["delete"](chFrom, chTo));
+      var marks = doc.resolve(change.start).marksAcross(doc.resolve(change.endA));
+      if (marks) _tr2.ensureMarks(marks);
+      view.dispatch(_tr2);
     } else if (change.endA == change.endB && (markChange = isMarkChange($from.parent.content.cut($from.parentOffset, $to.parentOffset), $fromA.parent.content.cut($fromA.parentOffset, change.endA - $fromA.start())))) {
-      tr = view.state.tr;
-      if (markChange.type == "add") tr.addMark(chFrom, chTo, markChange.mark);else tr.removeMark(chFrom, chTo, markChange.mark);
+      var _tr3 = mkTr(view.state.tr);
+      if (markChange.type == "add") _tr3.addMark(chFrom, chTo, markChange.mark);else _tr3.removeMark(chFrom, chTo, markChange.mark);
+      view.dispatch(_tr3);
     } else if ($from.parent.child($from.index()).isText && $from.index() == $to.index() - ($to.textOffset ? 0 : 1)) {
       var text = $from.parent.textBetween($from.parentOffset, $to.parentOffset);
-      if (view.someProp("handleTextInput", function (f) {
-        return f(view, chFrom, chTo, text);
-      })) return;
-      tr = view.state.tr.insertText(text, chFrom, chTo);
+      var deflt = function deflt() {
+        return mkTr(view.state.tr.insertText(text, chFrom, chTo));
+      };
+      if (!view.someProp("handleTextInput", function (f) {
+        return f(view, chFrom, chTo, text, deflt);
+      })) view.dispatch(deflt());
     }
+  } else {
+    view.dispatch(mkTr());
   }
-  if (!tr) tr = view.state.tr.replace(chFrom, chTo, parse.doc.slice(change.start - parse.from, change.endB - parse.from));
-  if (parse.sel) {
-    var _sel3 = resolveSelection(view, tr.doc, parse.sel);
-    if (_sel3 && !(chrome && view.composing && _sel3.empty && (change.start != change.endB || view.input.lastChromeDelete < Date.now() - 100) && (_sel3.head == chFrom || _sel3.head == tr.mapping.map(chTo) - 1) || ie && _sel3.empty && _sel3.head == chFrom)) tr.setSelection(_sel3);
-  }
-  if (storedMarks) tr.ensureMarks(storedMarks);
-  if (compositionID) tr.setMeta("composition", compositionID);
-  view.dispatch(tr.scrollIntoView());
 }
 function resolveSelection(view, doc, parsedSel) {
   if (Math.max(parsedSel.anchor, parsedSel.head) > doc.content.size) return null;
@@ -4812,7 +4854,6 @@ function isSurrogatePair(str) {
     b = str.charCodeAt(1);
   return a >= 0xDC00 && a <= 0xDFFF && b >= 0xD800 && b <= 0xDBFF;
 }
-var __serializeForClipboard = serializeForClipboard;
 var __parseFromClipboard = parseFromClipboard;
 var __endComposition = endComposition;
 var EditorView = function () {
@@ -4965,7 +5006,7 @@ var EditorView = function () {
     value: function scrollToSelection() {
       var _this16 = this;
       var startDOM = this.domSelectionRange().focusNode;
-      if (this.someProp("handleScrollToSelection", function (f) {
+      if (!startDOM || !this.dom.contains(startDOM.nodeType == 1 ? startDOM : startDOM.parentNode)) ;else if (this.someProp("handleScrollToSelection", function (f) {
         return f(_this16);
       })) ;else if (this.state.selection instanceof prosemirrorState.NodeSelection) {
         var target = this.docView.domAfterPos(this.state.selection.from);
@@ -5130,6 +5171,11 @@ var EditorView = function () {
       return doPaste(this, text, null, true, event || new ClipboardEvent("paste"));
     }
   }, {
+    key: "serializeForClipboard",
+    value: function serializeForClipboard(slice) {
+      return _serializeForClipboard(this, slice);
+    }
+  }, {
     key: "destroy",
     value: function destroy() {
       if (!this.docView) return;
@@ -5156,12 +5202,6 @@ var EditorView = function () {
       return _dispatchEvent(this, event);
     }
   }, {
-    key: "dispatch",
-    value: function dispatch(tr) {
-      var dispatchTransaction = this._props.dispatchTransaction;
-      if (dispatchTransaction) dispatchTransaction.call(this, tr);else this.updateState(this.state.apply(tr));
-    }
-  }, {
     key: "domSelectionRange",
     value: function domSelectionRange() {
       var sel = this.domSelection();
@@ -5180,6 +5220,10 @@ var EditorView = function () {
     }
   }]);
 }();
+EditorView.prototype.dispatch = function (tr) {
+  var dispatchTransaction = this._props.dispatchTransaction;
+  if (dispatchTransaction) dispatchTransaction.call(this, tr);else this.updateState(this.state.apply(tr));
+};
 function computeDocDeco(view) {
   var attrs = Object.create(null);
   attrs["class"] = "ProseMirror";
@@ -5246,4 +5290,3 @@ exports.DecorationSet = DecorationSet;
 exports.EditorView = EditorView;
 exports.__endComposition = __endComposition;
 exports.__parseFromClipboard = __parseFromClipboard;
-exports.__serializeForClipboard = __serializeForClipboard;

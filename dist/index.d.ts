@@ -1,5 +1,5 @@
 import { EditorState, Transaction, Selection, Plugin } from 'prosemirror-state';
-import { Mark, Node, TagParseRule, Slice, ResolvedPos, DOMParser, DOMSerializer } from 'prosemirror-model';
+import { Mark, Node, Slice, ResolvedPos, DOMParser, DOMSerializer } from 'prosemirror-model';
 import { Mapping } from 'prosemirror-transform';
 
 type DOMNode = InstanceType<typeof window.Node>;
@@ -10,6 +10,7 @@ declare class Decoration {
     readonly to: number;
     static widget(pos: number, toDOM: WidgetConstructor, spec?: {
         side?: number;
+        relaxedSide?: boolean;
         marks?: readonly Mark[];
         stopEvent?: (event: Event) => boolean;
         ignoreSelection?: boolean;
@@ -64,7 +65,6 @@ declare class DecorationGroup implements DecorationSource {
 
 declare global {
     interface Node {
-        pmViewDesc?: ViewDesc;
     }
 }
 type ViewMutationRecord = MutationRecord | {
@@ -89,107 +89,8 @@ interface MarkView {
     ignoreMutation?: (mutation: ViewMutationRecord) => boolean;
     destroy?: () => void;
 }
-declare class ViewDesc {
-    parent: ViewDesc | undefined;
-    children: ViewDesc[];
-    dom: DOMNode;
-    contentDOM: HTMLElement | null;
-    dirty: number;
-    node: Node | null;
-    constructor(parent: ViewDesc | undefined, children: ViewDesc[], dom: DOMNode, contentDOM: HTMLElement | null);
-    matchesWidget(widget: Decoration): boolean;
-    matchesMark(mark: Mark): boolean;
-    matchesNode(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource): boolean;
-    matchesHack(nodeName: string): boolean;
-    parseRule(): Omit<TagParseRule, "tag"> | null;
-    stopEvent(event: Event): boolean;
-    get size(): number;
-    get border(): number;
-    destroy(): void;
-    posBeforeChild(child: ViewDesc): number;
-    get posBefore(): number;
-    get posAtStart(): number;
-    get posAfter(): number;
-    get posAtEnd(): number;
-    localPosFromDOM(dom: DOMNode, offset: number, bias: number): number;
-    nearestDesc(dom: DOMNode): ViewDesc | undefined;
-    nearestDesc(dom: DOMNode, onlyNodes: true): NodeViewDesc | undefined;
-    getDesc(dom: DOMNode): ViewDesc | undefined;
-    posFromDOM(dom: DOMNode, offset: number, bias: number): number;
-    descAt(pos: number): ViewDesc | undefined;
-    domFromPos(pos: number, side: number): {
-        node: DOMNode;
-        offset: number;
-        atom?: number;
-    };
-    parseRange(from: number, to: number, base?: number): {
-        node: DOMNode;
-        from: number;
-        to: number;
-        fromOffset: number;
-        toOffset: number;
-    };
-    emptyChildAt(side: number): boolean;
-    domAfterPos(pos: number): DOMNode;
-    setSelection(anchor: number, head: number, view: EditorView, force?: boolean): void;
-    ignoreMutation(mutation: ViewMutationRecord): boolean;
-    get contentLost(): boolean | null;
-    markDirty(from: number, to: number): void;
-    markParentsDirty(): void;
-    get domAtom(): boolean;
-    get ignoreForCoords(): boolean;
-    isText(text: string): boolean;
-}
-declare class NodeViewDesc extends ViewDesc {
-    node: Node;
-    outerDeco: readonly Decoration[];
-    innerDeco: DecorationSource;
-    readonly nodeDOM: DOMNode;
-    constructor(parent: ViewDesc | undefined, node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, dom: DOMNode, contentDOM: HTMLElement | null, nodeDOM: DOMNode, view: EditorView, pos: number);
-    static create(parent: ViewDesc | undefined, node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView, pos: number): NodeViewDesc | TextViewDesc;
-    parseRule(): Omit<TagParseRule, "tag"> | null;
-    matchesNode(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource): boolean;
-    get size(): number;
-    get border(): 0 | 1;
-    updateChildren(view: EditorView, pos: number): void;
-    localCompositionInfo(view: EditorView, pos: number): {
-        node: Text;
-        pos: number;
-        text: string;
-    } | null;
-    protectLocalComposition(view: EditorView, { node, pos, text }: {
-        node: Text;
-        pos: number;
-        text: string;
-    }): void;
-    update(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView): boolean;
-    updateInner(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView): void;
-    updateOuterDeco(outerDeco: readonly Decoration[]): void;
-    selectNode(): void;
-    deselectNode(): void;
-    get domAtom(): boolean;
-}
-declare class TextViewDesc extends NodeViewDesc {
-    constructor(parent: ViewDesc | undefined, node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, dom: DOMNode, nodeDOM: DOMNode, view: EditorView);
-    parseRule(): {
-        skip: any;
-    };
-    update(node: Node, outerDeco: readonly Decoration[], innerDeco: DecorationSource, view: EditorView): boolean;
-    inParent(): boolean;
-    domFromPos(pos: number): {
-        node: globalThis.Node;
-        offset: number;
-    };
-    localPosFromDOM(dom: DOMNode, offset: number, bias: number): number;
-    ignoreMutation(mutation: ViewMutationRecord): boolean;
-    slice(from: number, to: number, view: EditorView): TextViewDesc;
-    markDirty(from: number, to: number): void;
-    get domAtom(): boolean;
-    isText(text: string): boolean;
-}
 
 declare class EditorView {
-    private _props;
     private directPlugins;
     private _root;
     private mounted;
@@ -243,10 +144,15 @@ declare class EditorView {
     endOfTextblock(dir: "up" | "down" | "left" | "right" | "forward" | "backward", state?: EditorState): boolean;
     pasteHTML(html: string, event?: ClipboardEvent): boolean;
     pasteText(text: string, event?: ClipboardEvent): boolean;
+    serializeForClipboard(slice: Slice): {
+        dom: HTMLElement;
+        text: string;
+        slice: Slice;
+    };
     destroy(): void;
     get isDestroyed(): boolean;
     dispatchEvent(event: Event): void;
-    dispatch(tr: Transaction): void;
+    dispatch: (tr: Transaction) => void;
 }
 type NodeViewConstructor = (node: Node, view: EditorView, getPos: () => number | undefined, decorations: readonly Decoration[], innerDecorations: DecorationSource) => NodeView;
 type MarkViewConstructor = (mark: Mark, view: EditorView, inline: boolean) => MarkView;
@@ -259,7 +165,7 @@ interface EditorProps<P = any> {
     };
     handleKeyDown?: (this: P, view: EditorView, event: KeyboardEvent) => boolean | void;
     handleKeyPress?: (this: P, view: EditorView, event: KeyboardEvent) => boolean | void;
-    handleTextInput?: (this: P, view: EditorView, from: number, to: number, text: string) => boolean | void;
+    handleTextInput?: (this: P, view: EditorView, from: number, to: number, text: string, deflt: () => Transaction) => boolean | void;
     handleClickOn?: (this: P, view: EditorView, pos: number, node: Node, nodePos: number, event: MouseEvent, direct: boolean) => boolean | void;
     handleClick?: (this: P, view: EditorView, pos: number, event: MouseEvent) => boolean | void;
     handleDoubleClickOn?: (this: P, view: EditorView, pos: number, node: Node, nodePos: number, event: MouseEvent, direct: boolean) => boolean | void;
@@ -269,13 +175,14 @@ interface EditorProps<P = any> {
     handlePaste?: (this: P, view: EditorView, event: ClipboardEvent, slice: Slice) => boolean | void;
     handleDrop?: (this: P, view: EditorView, event: DragEvent, slice: Slice, moved: boolean) => boolean | void;
     handleScrollToSelection?: (this: P, view: EditorView) => boolean;
+    dragCopies?: (event: DragEvent) => boolean;
     createSelectionBetween?: (this: P, view: EditorView, anchor: ResolvedPos, head: ResolvedPos) => Selection | null;
     domParser?: DOMParser;
     transformPastedHTML?: (this: P, html: string, view: EditorView) => string;
     clipboardParser?: DOMParser;
     transformPastedText?: (this: P, text: string, plain: boolean, view: EditorView) => string;
     clipboardTextParser?: (this: P, text: string, $context: ResolvedPos, plain: boolean, view: EditorView) => Slice;
-    transformPasted?: (this: P, slice: Slice, view: EditorView) => Slice;
+    transformPasted?: (this: P, slice: Slice, view: EditorView, plain: boolean) => Slice;
     transformCopied?: (this: P, slice: Slice, view: EditorView) => Slice;
     nodeViews?: {
         [node: string]: NodeViewConstructor;

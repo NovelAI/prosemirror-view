@@ -35,6 +35,7 @@ const isEquivalentPosition = function (node, off, targetNode, targetOff) {
 };
 const atomElements = /^(img|br|input|textarea|hr)$/i;
 function scanFor(node, off, targetNode, targetOff, dir) {
+    var _a;
     for (;;) {
         if (node == targetNode && off == targetOff)
             return true;
@@ -47,10 +48,17 @@ function scanFor(node, off, targetNode, targetOff, dir) {
             node = parent;
         }
         else if (node.nodeType == 1) {
-            node = node.childNodes[off + (dir < 0 ? -1 : 0)];
-            if (node.contentEditable == "false")
-                return false;
-            off = dir < 0 ? nodeSize(node) : 0;
+            let child = node.childNodes[off + (dir < 0 ? -1 : 0)];
+            if (child.nodeType == 1 && child.contentEditable == "false") {
+                if ((_a = child.pmViewDesc) === null || _a === undefined ? undefined : _a.ignoreForSelection)
+                    off += dir;
+                else
+                    return false;
+            }
+            else {
+                node = child;
+                off = dir < 0 ? nodeSize(node) : 0;
+            }
         }
         else {
             return false;
@@ -201,11 +209,13 @@ function clientRect(node) {
 function scrollRectIntoView(view, rect, startDOM) {
     let scrollThreshold = view.someProp("scrollThreshold") || 0, scrollMargin = view.someProp("scrollMargin") || 5;
     let doc = view.dom.ownerDocument;
-    for (let parent = startDOM || view.dom;; parent = parentNode(parent)) {
+    for (let parent = startDOM || view.dom;;) {
         if (!parent)
             break;
-        if (parent.nodeType != 1)
+        if (parent.nodeType != 1) {
+            parent = parentNode(parent);
             continue;
+        }
         let elt = parent;
         let atTop = elt == doc.body;
         let bounding = atTop ? windowRect(doc) : clientRect(elt);
@@ -234,8 +244,10 @@ function scrollRectIntoView(view, rect, startDOM) {
                 rect = { left: rect.left - dX, top: rect.top - dY, right: rect.right - dX, bottom: rect.bottom - dY };
             }
         }
-        if (atTop || /^(fixed|sticky)$/.test(getComputedStyle(parent).position))
+        let pos = atTop ? "fixed" : getComputedStyle(parent).position;
+        if (/^(fixed|sticky)$/.test(pos))
             break;
+        parent = pos == "absolute" ? parent.offsetParent : parentNode(parent);
     }
 }
 // Store the scroll position of the editor's parent nodes, along with
@@ -416,7 +428,7 @@ function posFromCaret(view, node, offset, coords) {
         if (desc.dom.nodeType == 1 && (desc.node.isBlock && desc.parent || !desc.contentDOM) &&
             // Ignore elements with zero-size bounding rectangles
             ((rect = desc.dom.getBoundingClientRect()).width || rect.height)) {
-            if (desc.node.isBlock && desc.parent) {
+            if (desc.node.isBlock && desc.parent && !/^T(R|BODY|HEAD|FOOT)$/.test(desc.dom.nodeName)) {
                 // Only apply the horizontal test to the innermost block. Vertical for any parent.
                 if (!sawBlock && rect.left > coords.left || rect.top > coords.top)
                     outsideBlock = desc.posBefore;
@@ -1074,7 +1086,7 @@ class ViewDesc {
         // (one where the focus is before the anchor), but not all
         // browsers support it yet.
         let domSelExtended = false;
-        if ((domSel.extend || anchor == head) && !brKludge) {
+        if ((domSel.extend || anchor == head) && !(brKludge && gecko)) {
             domSel.collapse(anchorDOM.node, anchorDOM.offset);
             try {
                 if (anchor != head)
@@ -1144,6 +1156,7 @@ class ViewDesc {
     }
     get domAtom() { return false; }
     get ignoreForCoords() { return false; }
+    get ignoreForSelection() { return false; }
     isText(text) { return false; }
 }
 // A widget desc represents a widget decoration, which is a DOM node
@@ -1188,6 +1201,7 @@ class WidgetViewDesc extends ViewDesc {
         super.destroy();
     }
     get domAtom() { return true; }
+    get ignoreForSelection() { return !!this.widget.type.spec.relaxedSide; }
     get side() { return this.widget.type.side; }
 }
 class CompositionViewDesc extends ViewDesc {
@@ -2333,17 +2347,14 @@ function removeClassOnSelectionChange(view) {
     });
 }
 function selectCursorWrapper(view) {
-    let domSel = view.domSelection(), range = document.createRange();
+    let domSel = view.domSelection();
     if (!domSel)
         return;
     let node = view.cursorWrapper.dom, img = node.nodeName == "IMG";
     if (img)
-        range.setStart(node.parentNode, domIndex(node) + 1);
+        domSel.collapse(node.parentNode, domIndex(node) + 1);
     else
-        range.setStart(node, 0);
-    range.collapse(true);
-    domSel.removeAllRanges();
-    domSel.addRange(range);
+        domSel.collapse(node, 0);
     // Kludge to kill 'control selection' in IE11 when selecting an
     // invisible cursor wrapper, since that would result in those weird
     // resize handles and a selection that considers the absolutely
@@ -2831,11 +2842,14 @@ function parseFromClipboard(view, text, html, plainText, $context) {
     let dom, slice;
     if (!html && !text)
         return null;
-    let asText = text && (plainText || inCode || !html);
+    let asText = !!text && (plainText || inCode || !html);
     if (asText) {
         view.someProp("transformPastedText", f => { text = f(text, inCode || plainText, view); });
-        if (inCode)
-            return text ? new Slice(Fragment.from(view.state.schema.text(text.replace(/\r\n?/g, "\n"))), 0, 0) : Slice.empty;
+        if (inCode) {
+            slice = new Slice(Fragment.from(view.state.schema.text(text.replace(/\r\n?/g, "\n"))), 0, 0);
+            view.someProp("transformPasted", f => { slice = f(slice, view, true); });
+            return slice;
+        }
         let parsed = view.someProp("clipboardTextParser", f => f(text, $context, plainText, view));
         if (parsed) {
             slice = parsed;
@@ -2893,7 +2907,7 @@ function parseFromClipboard(view, text, html, plainText, $context) {
             slice = closeSlice(slice, openStart, openEnd);
         }
     }
-    view.someProp("transformPasted", f => { slice = f(slice, view); });
+    view.someProp("transformPasted", f => { slice = f(slice, view, asText); });
     return slice;
 }
 const inlineParents = /^(a|abbr|acronym|b|cite|code|del|em|i|ins|kbd|label|output|q|ruby|s|samp|span|strong|sub|sup|time|u|tt|var)$/i;
@@ -3004,7 +3018,7 @@ function maybeWrapTrusted(html) {
     // innerHTML, even on a detached document. This wraps the string in
     // a way that makes the browser allow us to use its parser again.
     if (!_policy)
-        _policy = trustedTypes.createPolicy("ProseMirrorClipboard", { createHTML: (s) => s });
+        _policy = trustedTypes.defaultPolicy || trustedTypes.createPolicy("ProseMirrorClipboard", { createHTML: (s) => s });
     return _policy.createHTML(html);
 }
 function readHTML(html) {
@@ -3067,7 +3081,7 @@ class InputState {
         this.mouseDown = null;
         this.lastKeyCode = null;
         this.lastKeyCodeTime = 0;
-        this.lastClick = { time: 0, x: 0, y: 0, type: "" };
+        this.lastClick = { time: 0, x: 0, y: 0, type: "", button: 0 };
         this.lastSelectionOrigin = null;
         this.lastSelectionTime = 0;
         this.lastIOSEnter = 0;
@@ -3195,8 +3209,9 @@ editHandlers.keypress = (view, _event) => {
     let sel = view.state.selection;
     if (!(sel instanceof TextSelection) || !sel.$from.sameParent(sel.$to)) {
         let text = String.fromCharCode(event.charCode);
-        if (!/[\r\n]/.test(text) && !view.someProp("handleTextInput", f => f(view, sel.$from.pos, sel.$to.pos, text)))
-            view.dispatch(view.state.tr.insertText(text).scrollIntoView());
+        let deflt = () => view.state.tr.insertText(text).scrollIntoView();
+        if (!/[\r\n]/.test(text) && !view.someProp("handleTextInput", f => f(view, sel.$from.pos, sel.$to.pos, text, deflt)))
+            view.dispatch(deflt());
         event.preventDefault();
     }
 };
@@ -3308,13 +3323,14 @@ handlers.mousedown = (view, _event) => {
     view.input.shiftKey = event.shiftKey;
     let flushed = forceDOMFlush(view);
     let now = Date.now(), type = "singleClick";
-    if (now - view.input.lastClick.time < 500 && isNear(event, view.input.lastClick) && !event[selectNodeModifier]) {
+    if (now - view.input.lastClick.time < 500 && isNear(event, view.input.lastClick) && !event[selectNodeModifier] &&
+        view.input.lastClick.button == event.button) {
         if (view.input.lastClick.type == "singleClick")
             type = "doubleClick";
         else if (view.input.lastClick.type == "doubleClick")
             type = "tripleClick";
     }
-    view.input.lastClick = { time: now, x: event.clientX, y: event.clientY, type };
+    view.input.lastClick = { time: now, x: event.clientX, y: event.clientY, type, button: event.button };
     let pos = view.posAtCoords(eventCoords(event));
     if (!pos)
         return;
@@ -3569,10 +3585,10 @@ function endComposition(view, restarting = false) {
     view.domObserver.forceFlush();
     clearComposition(view);
     if (restarting || view.docView && view.docView.dirty) {
-        let sel = selectionFromDOM(view);
-        if (sel && !sel.eq(view.state.selection))
+        let sel = selectionFromDOM(view), cur = view.state.selection;
+        if (sel && !sel.eq(cur))
             view.dispatch(view.state.tr.setSelection(sel));
-        else if ((view.markCursor || restarting) && !view.state.selection.empty)
+        else if ((view.markCursor || restarting) && !cur.$from.node(cur.$from.sharedDepth(cur.to)).inlineContent)
             view.dispatch(view.state.tr.deleteSelection());
         else
             view.updateState(view.state);
@@ -3695,6 +3711,10 @@ class Dragging {
     }
 }
 const dragCopyModifier = mac ? "altKey" : "ctrlKey";
+function dragMoves(view, event) {
+    let moves = view.someProp("dragCopies", test => !test(event));
+    return moves != null ? moves : !event[dragCopyModifier];
+}
 handlers.dragstart = (view, _event) => {
     let event = _event;
     let mouseDown = view.input.mouseDown;
@@ -3724,7 +3744,7 @@ handlers.dragstart = (view, _event) => {
     event.dataTransfer.effectAllowed = "copyMove";
     if (!brokenClipboardAPI)
         event.dataTransfer.setData("text/plain", text);
-    view.dragging = new Dragging(slice, !event[dragCopyModifier], node);
+    view.dragging = new Dragging(slice, dragMoves(view, event), node);
 };
 handlers.dragend = view => {
     let dragging = view.dragging;
@@ -3746,12 +3766,12 @@ editHandlers.drop = (view, _event) => {
     let $mouse = view.state.doc.resolve(eventPos.pos);
     let slice = dragging && dragging.slice;
     if (slice) {
-        view.someProp("transformPasted", f => { slice = f(slice, view); });
+        view.someProp("transformPasted", f => { slice = f(slice, view, false); });
     }
     else {
         slice = parseFromClipboard(view, getText(event.dataTransfer), brokenClipboardAPI ? null : event.dataTransfer.getData("text/html"), false, $mouse);
     }
-    let move = !!(dragging && !event[dragCopyModifier]);
+    let move = !!(dragging && dragMoves(view, event));
     if (view.someProp("handleDrop", f => f(view, event, slice || Slice.empty, move))) {
         event.preventDefault();
         return;
@@ -4878,7 +4898,7 @@ function ruleFromNode(dom) {
     }
     return null;
 }
-const isInline = /^(a|abbr|acronym|b|bd[io]|big|br|button|cite|code|data(list)?|del|dfn|em|i|ins|kbd|label|map|mark|meter|output|q|ruby|s|samp|small|span|strong|su[bp]|time|u|tt|var)$/i;
+const isInline = /^(a|abbr|acronym|b|bd[io]|big|br|button|cite|code|data(list)?|del|dfn|em|i|img|ins|kbd|label|map|mark|meter|output|q|ruby|s|samp|small|span|strong|su[bp]|time|u|tt|var)$/i;
 function readDOMChange(view, from, to, typeOver, addedNodes) {
     let compositionID = view.input.compositionPendingChanges || (view.composing ? view.input.compositionID : 0);
     view.input.compositionPendingChanges = 0;
@@ -4982,9 +5002,11 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
     // as being an iOS enter press), just dispatch an Enter key instead.
     if (((ios && view.input.lastIOSEnter > Date.now() - 225 &&
         (!inlineChange || addedNodes.some(n => n.nodeName == "DIV" || n.nodeName == "P"))) ||
-        (!inlineChange && $from.pos < parse.doc.content.size && !$from.sameParent($to) &&
+        (!inlineChange && $from.pos < parse.doc.content.size &&
+            (!$from.sameParent($to) || !$from.parent.inlineContent) &&
+            !/\S/.test(parse.doc.textBetween($from.pos, $to.pos, "", "")) &&
             (nextSel = Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) &&
-            nextSel.head == $to.pos)) &&
+            nextSel.head > $from.pos)) &&
         view.someProp("handleKeyDown", f => f(view, keyEvent(13, "Enter")))) {
         view.input.lastIOSEnter = 0;
         return;
@@ -5019,7 +5041,26 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
         }, 20);
     }
     let chFrom = change.start, chTo = change.endA;
-    let tr, storedMarks, markChange;
+    let mkTr = (base) => {
+        let tr = base || view.state.tr.replace(chFrom, chTo, parse.doc.slice(change.start - parse.from, change.endB - parse.from));
+        if (parse.sel) {
+            let sel = resolveSelection(view, tr.doc, parse.sel);
+            // Chrome will sometimes, during composition, report the
+            // selection in the wrong place. If it looks like that is
+            // happening, don't update the selection.
+            // Edge just doesn't move the cursor forward when you start typing
+            // in an empty block or between br nodes.
+            if (sel && !(chrome && view.composing && sel.empty &&
+                (change.start != change.endB || view.input.lastChromeDelete < Date.now() - 100) &&
+                (sel.head == chFrom || sel.head == tr.mapping.map(chTo) - 1) ||
+                ie && sel.empty && sel.head == chFrom))
+                tr.setSelection(sel);
+        }
+        if (compositionID)
+            tr.setMeta("composition", compositionID);
+        return tr.scrollIntoView();
+    };
+    let markChange;
     if (inlineChange) {
         if ($from.pos == $to.pos) { // Deletion
             // IE11 sometimes weirdly moves the DOM selection around after
@@ -5028,46 +5069,33 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
                 view.domObserver.suppressSelectionUpdates();
                 setTimeout(() => selectionToDOM(view), 20);
             }
-            tr = view.state.tr.delete(chFrom, chTo);
-            storedMarks = doc.resolve(change.start).marksAcross(doc.resolve(change.endA));
+            let tr = mkTr(view.state.tr.delete(chFrom, chTo));
+            let marks = doc.resolve(change.start).marksAcross(doc.resolve(change.endA));
+            if (marks)
+                tr.ensureMarks(marks);
+            view.dispatch(tr);
         }
         else if ( // Adding or removing a mark
         change.endA == change.endB &&
             (markChange = isMarkChange($from.parent.content.cut($from.parentOffset, $to.parentOffset), $fromA.parent.content.cut($fromA.parentOffset, change.endA - $fromA.start())))) {
-            tr = view.state.tr;
+            let tr = mkTr(view.state.tr);
             if (markChange.type == "add")
                 tr.addMark(chFrom, chTo, markChange.mark);
             else
                 tr.removeMark(chFrom, chTo, markChange.mark);
+            view.dispatch(tr);
         }
         else if ($from.parent.child($from.index()).isText && $from.index() == $to.index() - ($to.textOffset ? 0 : 1)) {
             // Both positions in the same text node -- simply insert text
             let text = $from.parent.textBetween($from.parentOffset, $to.parentOffset);
-            if (view.someProp("handleTextInput", f => f(view, chFrom, chTo, text)))
-                return;
-            tr = view.state.tr.insertText(text, chFrom, chTo);
+            let deflt = () => mkTr(view.state.tr.insertText(text, chFrom, chTo));
+            if (!view.someProp("handleTextInput", f => f(view, chFrom, chTo, text, deflt)))
+                view.dispatch(deflt());
         }
     }
-    if (!tr)
-        tr = view.state.tr.replace(chFrom, chTo, parse.doc.slice(change.start - parse.from, change.endB - parse.from));
-    if (parse.sel) {
-        let sel = resolveSelection(view, tr.doc, parse.sel);
-        // Chrome will sometimes, during composition, report the
-        // selection in the wrong place. If it looks like that is
-        // happening, don't update the selection.
-        // Edge just doesn't move the cursor forward when you start typing
-        // in an empty block or between br nodes.
-        if (sel && !(chrome && view.composing && sel.empty &&
-            (change.start != change.endB || view.input.lastChromeDelete < Date.now() - 100) &&
-            (sel.head == chFrom || sel.head == tr.mapping.map(chTo) - 1) ||
-            ie && sel.empty && sel.head == chFrom))
-            tr.setSelection(sel);
+    else {
+        view.dispatch(mkTr());
     }
-    if (storedMarks)
-        tr.ensureMarks(storedMarks);
-    if (compositionID)
-        tr.setMeta("composition", compositionID);
-    view.dispatch(tr.scrollIntoView());
 }
 function resolveSelection(view, doc, parsedSel) {
     if (Math.max(parsedSel.anchor, parsedSel.head) > doc.content.size)
@@ -5176,8 +5204,6 @@ function isSurrogatePair(str) {
     return a >= 0xDC00 && a <= 0xDFFF && b >= 0xD800 && b <= 0xDBFF;
 }
 
-/// @internal
-const __serializeForClipboard = serializeForClipboard;
 /// @internal
 const __parseFromClipboard = parseFromClipboard;
 /// @internal
@@ -5375,7 +5401,8 @@ class EditorView {
     /// @internal
     scrollToSelection() {
         let startDOM = this.domSelectionRange().focusNode;
-        if (this.someProp("handleScrollToSelection", f => f(this))) ;
+        if (!startDOM || !this.dom.contains(startDOM.nodeType == 1 ? startDOM : startDOM.parentNode)) ;
+        else if (this.someProp("handleScrollToSelection", f => f(this))) ;
         else if (this.state.selection instanceof NodeSelection) {
             let target = this.docView.domAfterPos(this.state.selection.from);
             if (target.nodeType == 1)
@@ -5570,6 +5597,15 @@ class EditorView {
     pasteText(text, event) {
         return doPaste(this, text, null, true, event || new ClipboardEvent("paste"));
     }
+    /// Serialize the given slice as it would be if it was copied from
+    /// this editor. Returns a DOM element that contains a
+    /// representation of the slice as its children, a textual
+    /// representation, and the transformed slice (which can be
+    /// different from the given input due to hooks like
+    /// [`transformCopied`](#view.EditorProps.transformCopied)).
+    serializeForClipboard(slice) {
+        return serializeForClipboard(this, slice);
+    }
     /// Removes the editor from the DOM and destroys all [node
     /// views](#view.NodeView).
     destroy() {
@@ -5598,20 +5634,6 @@ class EditorView {
     dispatchEvent(event) {
         return dispatchEvent(this, event);
     }
-    /// Dispatch a transaction. Will call
-    /// [`dispatchTransaction`](#view.DirectEditorProps.dispatchTransaction)
-    /// when given, and otherwise defaults to applying the transaction to
-    /// the current state and calling
-    /// [`updateState`](#view.EditorView.updateState) with the result.
-    /// This method is bound to the view instance, so that it can be
-    /// easily passed around.
-    dispatch(tr) {
-        let dispatchTransaction = this._props.dispatchTransaction;
-        if (dispatchTransaction)
-            dispatchTransaction.call(this, tr);
-        else
-            this.updateState(this.state.apply(tr));
-    }
     /// @internal
     domSelectionRange() {
         let sel = this.domSelection();
@@ -5625,6 +5647,13 @@ class EditorView {
         return this.root.getSelection();
     }
 }
+EditorView.prototype.dispatch = function (tr) {
+    let dispatchTransaction = this._props.dispatchTransaction;
+    if (dispatchTransaction)
+        dispatchTransaction.call(this, tr);
+    else
+        this.updateState(this.state.apply(tr));
+};
 function computeDocDeco(view) {
     let attrs = Object.create(null);
     attrs.class = "ProseMirror";
@@ -5692,4 +5721,4 @@ function checkStateComponent(plugin) {
         throw new RangeError("Plugins passed directly to the view must not have a state component");
 }
 
-export { Decoration, DecorationSet, EditorView, __endComposition, __parseFromClipboard, __serializeForClipboard };
+export { Decoration, DecorationSet, EditorView, __endComposition, __parseFromClipboard };
