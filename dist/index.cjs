@@ -4641,6 +4641,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
     preferredPos = view.state.selection.from;
     preferredSide = "start";
   }
+  var lastKeyCode = view.input.lastKeyCode;
   view.input.lastKeyCode = null;
   var change = findDiff(compare.content, parse.doc.content, parse.from, preferredPos, preferredSide);
   if (change) view.input.domChangeCount++;
@@ -4691,7 +4692,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
   var nextSel;
   if ((ios && view.input.lastIOSEnter > Date.now() - 225 && (!inlineChange || addedNodes.some(function (n) {
     return n.nodeName == "DIV" || n.nodeName == "P";
-  })) || !inlineChange && $from.pos < parse.doc.content.size && (!$from.sameParent($to) || !$from.parent.inlineContent) && !/\S/.test(parse.doc.textBetween($from.pos, $to.pos, "", "")) && (nextSel = prosemirrorState.Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) && nextSel.head > $from.pos) && view.someProp("handleKeyDown", function (f) {
+  })) || !inlineChange && $from.pos < parse.doc.content.size && (!$from.sameParent($to) || !$from.parent.inlineContent) && !/\S/.test(parse.doc.textBetween($from.pos, $to.pos, "", "")) && (nextSel = prosemirrorState.Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) && nextSel.head > $from.pos && lastKeyCode !== 229) && view.someProp("handleKeyDown", function (f) {
     return f(view, keyEvent(13, "Enter"));
   })) {
     view.input.lastIOSEnter = 0;

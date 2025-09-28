@@ -4938,6 +4938,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
         preferredPos = view.state.selection.from;
         preferredSide = "start";
     }
+    let lastKeyCode = view.input.lastKeyCode;
     view.input.lastKeyCode = null;
     let change = findDiff(compare.content, parse.doc.content, parse.from, preferredPos, preferredSide);
     if (change)
@@ -5006,7 +5007,7 @@ function readDOMChange(view, from, to, typeOver, addedNodes) {
             (!$from.sameParent($to) || !$from.parent.inlineContent) &&
             !/\S/.test(parse.doc.textBetween($from.pos, $to.pos, "", "")) &&
             (nextSel = Selection.findFrom(parse.doc.resolve($from.pos + 1), 1, true)) &&
-            nextSel.head > $from.pos)) &&
+            nextSel.head > $from.pos && lastKeyCode !== 229)) &&
         view.someProp("handleKeyDown", f => f(view, keyEvent(13, "Enter")))) {
         view.input.lastIOSEnter = 0;
         return;
